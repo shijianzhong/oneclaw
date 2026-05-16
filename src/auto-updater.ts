@@ -1,6 +1,7 @@
 import { autoUpdater } from "electron-updater";
 import { dialog } from "electron";
 import * as log from "./logger";
+import { readOneclawConfig } from "./oneclaw-config";
 import {
   canStartUpdateDownload,
   createInitialUpdateBannerState,
@@ -43,6 +44,20 @@ function publishUpdateBannerState(
 export function setupAutoUpdater(): void {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+
+  // 更新通道：环境变量 > oneclaw.config.json > 默认 latest
+  // dev 通道拉取 dev-mac.yml / dev.yml（CI 构建完立即推送），stable 拉取 latest-mac.yml / latest.yml
+  const envUrl = process.env.ONECLAW_UPDATE_URL;
+  if (envUrl) {
+    log.info(`[updater] 使用自定义更新地址: ${envUrl}`);
+    autoUpdater.setFeedURL({ provider: "generic", url: envUrl });
+  } else {
+    const channel = readOneclawConfig()?.updateChannel;
+    if (channel === "dev") {
+      log.info("[updater] 使用 dev 更新通道");
+      autoUpdater.channel = "dev";
+    }
+  }
 
   // 将 electron-updater 内部日志转发到 app.log
   autoUpdater.logger = {
@@ -102,10 +117,11 @@ export function setupAutoUpdater(): void {
     publishUpdateBannerState({ type: "download-finished" });
     log.info("[updater] 准备自动重启安装更新");
     beforeQuitForInstallCallback?.();
-    // isSilent=false: 显示 NSIS 安装进度条，避免用户以为应用消失了。
-    //   WM_CLOSE 竞争已由 installer.nsh(taskkill) + before-quit(prepareForAppQuit) 双重覆盖，
-    //   不再需要静默模式绕过。
-    // isForceRunAfter=true: 安装完成后自动重启应用
+    // isSilent=false: 保留 NSIS 窗口以显示安装进度条（30s-1min）。
+    //   installer.nsh 通过 customWelcomePage / customInstallMode / customFinishPage 三个宏
+    //   在 --updated 模式下自动跳过 Welcome、安装模式选择、Finish 页面，
+    //   用户只看到进度条，无需任何点击。
+    // isForceRunAfter=true: 传递 --force-run 参数，Finish 页跳过后由 onFinishPagePre 启动 app
     autoUpdater.quitAndInstall(false, true);
   });
 

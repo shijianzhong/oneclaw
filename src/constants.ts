@@ -1,6 +1,8 @@
 import { app } from "electron";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
+import { execFileSync } from "child_process";
 import { isSetupCompleteFromConfig } from "./setup-completion";
 import { readOneclawConfig } from "./oneclaw-config";
 
@@ -29,8 +31,9 @@ export function resolveGatewayPort(): number {
 
 // ── 健康检查 ──
 
-// Windows 冷启动可能受 Defender/磁盘预热影响，30s 容易误判失败。
-export const HEALTH_TIMEOUT_MS = 90_000;
+// Windows 冷启动：Defender 实时扫描 + ASAR 内 ESM/jiti 转译导致模块加载 30-80s。
+// 热重启（上一个实例刚退出）场景下 80s 加载 + 5s 初始化 ≈ 85s，90s 超时余量不足。
+export const HEALTH_TIMEOUT_MS = process.platform === "win32" ? 180_000 : 90_000;
 export const HEALTH_POLL_INTERVAL_MS = 500;
 
 // ── 崩溃冷却 ──
@@ -99,23 +102,35 @@ function resolvePackagedWindowsNodeBin(): string {
   }
 }
 
-/** Node.js 二进制（packaged 复用 Electron binary + ELECTRON_RUN_AS_NODE；dev 优先用下载的） */
+// macOS：使用 Helper binary（Info.plist 含 LSUIElement=true，不产生 Dock 弹跳图标）。
+function resolveDarwinHelperNodeBin(): string | null {
+  const contentsDir = path.resolve(path.dirname(process.execPath), "..");
+  const exeName = path.basename(process.execPath);
+  const helperName = `${exeName} Helper`;
+  const helperPath = path.join(
+    contentsDir, "Frameworks", `${helperName}.app`, "Contents", "MacOS", helperName,
+  );
+  return fs.existsSync(helperPath) ? helperPath : null;
+}
+
+/**
+ * Node.js 二进制：dev 和 packaged 都走 Electron binary + ELECTRON_RUN_AS_NODE=1。
+ * 原因：package-resources.js 按 Electron ABI 编译带 binding.gyp 的 native addon
+ * （如 kimi-claw 依赖的 fs-ext），dev 下若改用 runtime/node（ABI 不同）会触发
+ * "was compiled against a different Node.js version using NODE_MODULE_VERSION" 加载失败。
+ * 让 dev 与 packaged 共用 Electron 的 Node ABI，保证带 native addon 的插件可加载、
+ * 同时让 dev 更贴近生产运行环境。
+ * macOS dev/packaged 均优先走 Helper.app，避免子进程在 Dock 中弹跳。
+ */
 export function resolveNodeBin(): string {
+  if (process.platform === "darwin") {
+    const helperPath = resolveDarwinHelperNodeBin();
+    if (helperPath) return helperPath;
+  }
   if (!app.isPackaged) {
-    const exe = IS_WIN ? "node.exe" : "node";
-    const bundled = path.join(resolveDevTargetPath(), "runtime", exe);
-    return fs.existsSync(bundled) ? bundled : "node";
+    return process.execPath;
   }
-  // macOS：使用 Helper binary（Info.plist 含 LSUIElement=true，不产生 Dock 弹跳图标）
-  if (!IS_WIN) {
-    const contentsDir = path.resolve(path.dirname(process.execPath), "..");
-    const exeName = path.basename(process.execPath);
-    const helperName = `${exeName} Helper`;
-    const helperPath = path.join(
-      contentsDir, "Frameworks", `${helperName}.app`, "Contents", "MacOS", helperName,
-    );
-    if (fs.existsSync(helperPath)) return helperPath;
-  }
+  if (!IS_WIN) return process.execPath;
   return resolvePackagedWindowsNodeBin();
 }
 
@@ -132,9 +147,32 @@ export function resolveCliNodeBin(): string {
   return resolveNodeBin();
 }
 
-/** packaged 模式需要的额外环境变量（让 Electron binary 作为纯 Node.js 运行） */
+/**
+ * Windows CLI 专用二进制（SUBSYSTEM:CONSOLE，NSIS 安装时由 PE 补丁生成）。
+ * 与主 exe 同目录，文件名为 "<ProductName>-CLI.exe"。
+ * 非 Windows 或 dev 模式返回 null。
+ */
+export function resolveCliExe(): string | null {
+  if (!IS_WIN || !app.isPackaged) return null;
+  const exeDir = path.dirname(process.execPath);
+  const ext = path.extname(process.execPath) || ".exe";
+  const base = path.basename(process.execPath, ext);
+  const cliExe = path.join(exeDir, `${base}-CLI${ext}`);
+  return fs.existsSync(cliExe) ? cliExe : null;
+}
+
+/** 判断当前是否为 ASAR 打包模式（gateway.asar 存在） */
+export function isAsarMode(): boolean {
+  const entry = resolveGatewayEntry();
+  return entry.includes(".asar");
+}
+
+/**
+ * 让 Electron binary 当作纯 Node.js 运行的环境变量。
+ * dev 和 packaged 都需要（配合 resolveNodeBin() 始终返回 Electron binary）。
+ */
 export function resolveNodeExtraEnv(): Record<string, string> {
-  return app.isPackaged ? { ELECTRON_RUN_AS_NODE: "1" } : {};
+  return { ELECTRON_RUN_AS_NODE: "1" };
 }
 
 /** npm CLI（dev 模式优先用 package:resources 下载的，无则降级系统 npm） */
@@ -156,8 +194,11 @@ export function resolveNpmBin(): string {
  */
 function resolveGatewayRoot(): string {
   const res = resolveResourcesPath();
+  // dev 模式用真实 Node.js，无法读取 asar 虚拟路径，直接走散文件
+  if (!app.isPackaged) {
+    return path.join(res, "gateway");
+  }
   const asarPath = path.join(res, "gateway.asar");
-  // 检测 asar 文件存在性：extname 防止把普通目录误判为 asar
   if (path.extname(asarPath) === ".asar" && fs.existsSync(asarPath)) {
     return asarPath;
   }
@@ -204,6 +245,95 @@ export function resolveUserBinDir(): string {
   return path.join(resolveUserStateDir(), "bin");
 }
 
+/** WebBridge 二进制和缓存根目录（~/.kimi-webbridge/） */
+// HOME/USERPROFILE 在 CI、sandbox、无人值守服务环境下可能没设置。
+// 落到 os.homedir() 是最后的安全网——比返回相对路径 `.kimi-webbridge`
+// 让二进制下载到当前工作目录要好得多（后续 binary 探测会失败）。
+export function resolveWebbridgeDataDir(): string {
+  const home =
+    (IS_WIN ? process.env.USERPROFILE : process.env.HOME) || os.homedir();
+  return path.join(home, ".kimi-webbridge");
+}
+
+/** WebBridge daemon 二进制完整路径（~/.kimi-webbridge/bin/kimi-webbridge[.exe]） */
+export function resolveWebbridgeBinaryPath(): string {
+  const exe = IS_WIN ? "kimi-webbridge.exe" : "kimi-webbridge";
+  return path.join(resolveWebbridgeDataDir(), "bin", exe);
+}
+
+/**
+ * 内置的 WebBridge CRX 安装包路径。
+ * 改用 external_crx + external_version 离线安装，绕过 Chrome 默认走的
+ * clients2.google.com 更新端点（在中国大陆访问受限）。CRX 在 dev 模式直接
+ * 来自仓库 resources/webbridge/，打包后由 afterPack 注入到 app bundle 内。
+ */
+export function resolveWebbridgeCrxPath(): string {
+  if (app.isPackaged) {
+    return path.join(
+      process.resourcesPath,
+      "resources",
+      "webbridge",
+      "kimi-webbridge.crx",
+    );
+  }
+  return path.join(
+    app.getAppPath(),
+    "resources",
+    "webbridge",
+    "kimi-webbridge.crx",
+  );
+}
+
+/** CRX 旁边的元数据 JSON（含 version / extensionId），与 CRX 同步更新 */
+export function resolveWebbridgeCrxMetadataPath(): string {
+  if (app.isPackaged) {
+    return path.join(
+      process.resourcesPath,
+      "resources",
+      "webbridge",
+      "kimi-webbridge.json",
+    );
+  }
+  return path.join(
+    app.getAppPath(),
+    "resources",
+    "webbridge",
+    "kimi-webbridge.json",
+  );
+}
+
+export interface WebbridgeCrxMetadata {
+  extensionId: string;
+  version: string;
+}
+
+/**
+ * 读 CRX 元数据。Chrome 的 external_crx 协议要求宣告的 version 与 CRX 内嵌
+ * manifest.json 的 version 一致——后者由 build-time 解包 CRX 并写入 sidecar JSON。
+ */
+export function readWebbridgeCrxMetadata(): WebbridgeCrxMetadata | null {
+  try {
+    const p = resolveWebbridgeCrxMetadataPath();
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
+    const extensionId =
+      typeof raw?.extensionId === "string" ? raw.extensionId.trim() : "";
+    const version =
+      typeof raw?.version === "string" ? raw.version.trim() : "";
+    if (!extensionId || !version) return null;
+    return { extensionId, version };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 浏览器扩展 ID 的唯一可信来源 —— resources/webbridge/kimi-webbridge.json
+ * （CRX 旁边的 sidecar，跟 CRX 一起打包进 app）。
+ */
+export function readWebbridgeExtensionId(): string {
+  return readWebbridgeCrxMetadata()?.extensionId ?? "";
+}
+
 /** 用户状态目录（~/.openclaw/） */
 export function resolveUserStateDir(): string {
   if (process.env.OPENCLAW_STATE_DIR) return process.env.OPENCLAW_STATE_DIR;
@@ -231,6 +361,24 @@ export function resolveGatewayLogPath(): string {
   return path.join(resolveUserStateDir(), "gateway.log");
 }
 
+/**
+ * 内置 channel plugin 的镜像源目录（resources/<target>/extensions-mirror/<id>/）。
+ * package-resources 把 4 个第三方 channel plugin 写入这里，afterPack 注入到
+ * app bundle 内。主进程启动时从这里 reconcile 到 ~/.openclaw/extensions/，由
+ * openclaw 的 external-plugin scan 路径加载。
+ */
+export function resolveExtensionsMirrorDir(): string {
+  return path.join(resolveResourcesPath(), "extensions-mirror");
+}
+
+/**
+ * 用户 external plugin 目录（~/.openclaw/extensions/）。
+ * openclaw host 会扫描这里加载 external plugin，无需 bundled-channel-entry shim。
+ */
+export function resolveUserExtensionsDir(): string {
+  return path.join(resolveUserStateDir(), "extensions");
+}
+
 // ── Chat UI 路径 ──
 
 /** Chat UI 的 index.html（dev 模式在 chat-ui/dist/，打包后在 app 资源中） */
@@ -242,6 +390,21 @@ export function resolveChatUiPath(): string {
 }
 
 // ── Setup 完成判断 ──
+
+// 多实例模式下读取 git 分支名，拼入窗口标题以区分不同 worktree 实例
+export function resolveDevBranchTag(): string {
+  if (!process.env.ONECLAW_MULTI_INSTANCE) return "";
+  try {
+    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: app.getAppPath(),
+      timeout: 3000,
+      encoding: "utf-8",
+    }).trim();
+    return branch ? ` [${branch}]` : "";
+  } catch {
+    return "";
+  }
+}
 
 /** 检查 Setup 是否已完成（优先读 oneclaw.config.json，兼容旧版） */
 export function isSetupComplete(): boolean {
@@ -259,4 +422,13 @@ export function isSetupComplete(): boolean {
   } catch {
     return false;
   }
+}
+
+// ── OfficeCLI 二进制路径 ──
+
+/** OfficeCLI 二进制路径，不存在时返回 null */
+export function resolveOfficecliBin(): string | null {
+  const exe = IS_WIN ? "officecli.exe" : "officecli";
+  const p = path.join(resolveResourcesPath(), "officecli", exe);
+  return fs.existsSync(p) ? p : null;
 }

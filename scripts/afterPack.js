@@ -78,6 +78,19 @@ exports.default = async function afterPack(context) {
   copyDirSync(runtimeSrc, path.join(targetBase, "runtime"));
   console.log(`[afterPack] 已注入 runtime/ → ${path.relative(appOutDir, path.join(targetBase, "runtime"))}`);
 
+  // extensions-mirror/ 是 OneClaw 第三方 channel plugin 的镜像源目录。
+  // 主进程启动时会把它 reconcile 到 ~/.openclaw/extensions/<id>/，由 openclaw
+  // 的 external-plugin scan 路径正常加载，避免 bundled-channel-entry shim 引发
+  // 的 jiti module-identity 分裂问题。
+  // 这是必需资源——缺失意味着 4 个 channel 插件都装不上，应直接 fail 打包。
+  const mirrorSrc = path.join(sourceBase, "extensions-mirror");
+  if (!fs.existsSync(mirrorSrc)) {
+    throw new Error(`[afterPack] 资源目录不存在: ${mirrorSrc}（package-resources 是否漏跑？）`);
+  }
+  const mirrorDest = path.join(targetBase, "extensions-mirror");
+  copyDirSync(mirrorSrc, mirrorDest);
+  console.log(`[afterPack] 已注入 extensions-mirror/ → ${path.relative(appOutDir, mirrorDest)}`);
+
   // 注入必须存在的单文件资源
   for (const name of REQUIRED_FILES) {
     const src = path.join(sourceBase, name);
@@ -99,11 +112,33 @@ exports.default = async function afterPack(context) {
     console.log(`[afterPack] 已注入 ${name}`);
   }
 
+  // ── 注入 WebBridge 内置 CRX（平台无关，从仓库根 resources/webbridge/ 拷贝） ──
+  // CRX 走本地安装协议（external_crx + external_version），绕过被墙的 clients2.google.com。
+  // 必须放在 app bundle 的 resources/resources/webbridge/ 下，与 constants.ts 的
+  // resolveWebbridgeCrxPath() 保持一致。缺 CRX 直接 fail——离线安装是该构建唯一的扩展安装路径。
+  const crxSrcDir = path.join(__dirname, "..", "resources", "webbridge");
+  const crxFile = path.join(crxSrcDir, "kimi-webbridge.crx");
+  const crxMeta = path.join(crxSrcDir, "kimi-webbridge.json");
+  if (!fs.existsSync(crxFile) || !fs.existsSync(crxMeta)) {
+    throw new Error(
+      `[afterPack] 缺少 WebBridge CRX 资源: ${crxFile} 或 ${crxMeta}`,
+    );
+  }
+  const crxDestDir = path.join(targetBase, "webbridge");
+  fs.mkdirSync(crxDestDir, { recursive: true });
+  fs.copyFileSync(crxFile, path.join(crxDestDir, "kimi-webbridge.crx"));
+  fs.copyFileSync(crxMeta, path.join(crxDestDir, "kimi-webbridge.json"));
+  const crxSizeKB = (fs.statSync(crxFile).size / 1024).toFixed(0);
+  console.log(`[afterPack] 已注入 webbridge/kimi-webbridge.crx (${crxSizeKB} KB)`);
+
   // ── 用 Electron binary 替换独立 Node.js（节省 80-100MB） ──
   const productName = context.packager.appInfo.productFilename;
   replaceNodeBinary(platform, targetBase, productName);
 
-  ensureElectronFrameworkBinary(platform, appOutDir, productName);
+  // ── Windows: 写入 CLI 补丁脚本（安装时由 NSIS 执行，复制主 exe 并补丁 PE SUBSYSTEM） ──
+  if (platform === "win32") {
+    writeCliBinaryPatchScript(appOutDir, productName);
+  }
 };
 
 // ── asar 模式：注入 gateway.asar + gateway.asar.unpacked/ ──
@@ -141,6 +176,47 @@ function injectGatewayLoose(sourceBase, targetBase, appOutDir, platform, context
   // 散文件模式保留 koffi 平台裁剪（asar 模式已前移到 package-resources）
   const arch = resolveArchName(context.arch);
   pruneGatewayModules(gatewayDest, platform, arch);
+}
+
+// ── Windows CLI 补丁脚本：安装时由 NSIS 调用，复制主 exe 并补丁 PE SUBSYSTEM ──
+// 不在 afterPack 阶段生成 CLI.exe 副本，避免安装器体积膨胀（+58MB）。
+// 改为写入一个 PowerShell 脚本，由 NSIS customInstall 在安装完成后执行。
+
+function writeCliBinaryPatchScript(appOutDir, productName) {
+  const resourcesDir = path.join(appOutDir, "resources");
+  fs.mkdirSync(resourcesDir, { recursive: true });
+
+  // PowerShell 脚本：复制主 exe → CLI exe，补丁 PE SUBSYSTEM 从 GUI(2) 到 CONSOLE(3)
+  const ps1 = [
+    "$src = Join-Path $env:INST_DIR '@@EXE@@'",
+    "$dst = Join-Path $env:INST_DIR '@@CLI@@'",
+    "Copy-Item $src $dst -Force",
+    "$f = [System.IO.File]::Open($dst, 'Open', 'ReadWrite')",
+    "try {",
+    "  $br = New-Object System.IO.BinaryReader($f)",
+    "  $bw = New-Object System.IO.BinaryWriter($f)",
+    "  # PE header offset at 0x3C",
+    "  $f.Seek(0x3C, 'Begin') | Out-Null",
+    "  $peOff = $br.ReadInt32()",
+    "  # PE signature check",
+    "  $f.Seek($peOff, 'Begin') | Out-Null",
+    "  $sig = $br.ReadInt32()",
+    "  if ($sig -ne 0x00004550) { throw 'Not a PE file' }",
+    "  # SUBSYSTEM at PE offset + 0x5C",
+    "  $f.Seek($peOff + 0x5C, 'Begin') | Out-Null",
+    "  $sub = $br.ReadInt16()",
+    "  if ($sub -eq 2) {",
+    "    $f.Seek($peOff + 0x5C, 'Begin') | Out-Null",
+    "    $bw.Write([Int16]3)",
+    "  }",
+    "} finally { $f.Close() }",
+  ].join("\r\n")
+    .replace(/@@EXE@@/g, `${productName}.exe`)
+    .replace(/@@CLI@@/g, `${productName}-CLI.exe`);
+
+  const scriptPath = path.join(resourcesDir, "create-cli-binary.ps1");
+  fs.writeFileSync(scriptPath, ps1, "utf-8");
+  console.log(`[afterPack] wrote create-cli-binary.ps1 for NSIS install-time CLI patching`);
 }
 
 // ── 用 Electron binary 代理替换独立 Node.js ──

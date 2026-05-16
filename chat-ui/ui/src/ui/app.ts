@@ -6,6 +6,7 @@ import type { DevicePairingList } from "./controllers/devices.ts";
 import type { ExecApprovalRequest } from "./controllers/exec-approval.ts";
 import type { ExecApprovalsFile, ExecApprovalsSnapshot } from "./controllers/exec-approvals.ts";
 import type { SkillMessage } from "./controllers/skills.ts";
+import type { NavigatePayload as IpcNavigatePayload } from "./data/ipc-bridge.ts";
 import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
 import type { ResolvedTheme, ThemeMode } from "./theme.ts";
@@ -51,12 +52,13 @@ import {
 import { DEFAULT_CRON_FORM, DEFAULT_LOG_LEVEL_FILTERS } from "./app-defaults.ts";
 import { connectGateway as connectGatewayInternal } from "./app-gateway.ts";
 import {
+  deferredGatewayConnect,
   handleConnected,
   handleDisconnected,
   handleFirstUpdated,
   handleUpdated,
 } from "./app-lifecycle.ts";
-import { renderApp } from "./app-render.ts";
+import { renderApp, initFeedbackBackground } from "./app-render.ts";
 import {
   exportLogs as exportLogsInternal,
   handleChatScroll as handleChatScrollInternal,
@@ -79,6 +81,7 @@ import {
 } from "./app-tool-stream.ts";
 import { resolveInjectedAssistantIdentity } from "./assistant-identity.ts";
 import { loadAssistantIdentity as loadAssistantIdentityInternal } from "./controllers/assistant-identity.ts";
+import { markSessionMeterDirty } from "./context-meter.ts";
 import { getLocale, t } from "./i18n.ts";
 import { loadSettings, type UiSettings } from "./storage.ts";
 import { type ChatAttachment, type ChatQueueItem, type ConfiguredModel, type CronFormState } from "./ui-types.ts";
@@ -119,57 +122,44 @@ type OneClawUpdateState = {
   showBadge: boolean;
 };
 
-type OneClawPairingRequest = {
-  channel: string;
-  code: string;
-  id: string;
-  name: string;
-  createdAt: string;
-  lastSeenAt: string;
+type ReleaseNotesData = {
+  currentVersion: string;
+  entries: Array<{ version: string; notes: { zh?: string; en?: string } }>;
+  locale: string;
 };
 
-type OneClawPairingChannelState = {
-  channel: string;
-  pendingCount: number;
-  requests: OneClawPairingRequest[];
-  updatedAt: number;
-  lastAutoApprovedAt: number | null;
-  lastAutoApprovedName: string | null;
-};
-
-type OneClawIpcResult = {
-  success?: boolean;
-  message?: string;
-};
-
-type OneClawPairingState = {
-  pendingCount: number;
-  requests: OneClawPairingRequest[];
-  updatedAt: number;
-  channels: Record<string, OneClawPairingChannelState>;
-};
+type OneClawNavigatePayload = IpcNavigatePayload;
 
 type OneClawBridge = {
-  onNavigate?: (cb: (payload: { view: "settings" }) => void) => (() => void) | void;
+  onNavigate?: (cb: (payload: OneClawNavigatePayload) => void) => (() => void) | void;
+  onGatewayReady?: (cb: () => void) => (() => void) | void;
+  reportSetupViewState?: (active: boolean) => void;
   onUpdateState?: (cb: (payload: OneClawUpdateState) => void) => (() => void) | void;
   getUpdateState?: () => Promise<OneClawUpdateState>;
-  onPairingState?: (
-    cb: (payload: OneClawPairingState) => void,
-  ) => (() => void) | void;
-  getPairingState?: () => Promise<OneClawPairingState>;
-  refreshPairingState?: () => void;
-  settingsApproveFeishuPairing?: (
-    params: { code: string; id?: string; name?: string },
-  ) => Promise<OneClawIpcResult>;
-  settingsRejectFeishuPairing?: (
-    params: { code: string; id?: string; name?: string },
-  ) => Promise<OneClawIpcResult>;
-  settingsApproveWecomPairing?: (
-    params: { code: string; id?: string; name?: string },
-  ) => Promise<OneClawIpcResult>;
-  settingsRejectWecomPairing?: (
-    params: { code: string; id?: string; name?: string },
-  ) => Promise<OneClawIpcResult>;
+  // sidebar 「连接你的常用浏览器」pill 用：纯查询当前是否需要修复
+  settingsWebbridgeNeedsRepair?: () => Promise<{
+    success: boolean;
+    data?: {
+      visible: boolean;
+      defaultBrowser: { id: string; name: string } | null;
+    };
+    message?: string;
+  }>;
+  // pill 点击时主动修复（清 blocklist + 写 External JSON），需要浏览器关闭
+  settingsWebbridgePillRepair?: () => Promise<{
+    success: boolean;
+    code?: "READY" | "ALREADY_OK" | "BROWSER_RUNNING" | "DEFAULT_BROWSER_UNSUPPORTED" | "FAILED";
+    browserName?: string;
+    message?: string;
+    includesExtension?: boolean;
+    browserRunning?: boolean;
+    // 主进程已主动打开浏览器+引导页 → 前端跳过 modal（避免冗余双层提示）
+    openedBrowser?: boolean;
+  }>;
+  // setup-task 后台装完扩展、settings 修复完成时由主进程广播——chat-ui 据此重查 needs-repair
+  onWebbridgeStateChanged?: (cb: () => void) => (() => void) | void;
+  getReleaseNotes?: () => Promise<ReleaseNotesData | null>;
+  dismissReleaseNotes?: (version: string) => Promise<void>;
 };
 
 const SHARE_PROMPT_STORE_KEY = "openclaw.share.prompt.v1";
@@ -209,6 +199,7 @@ export class OpenClawApp extends LitElement {
     chatSending: { state: true },
     chatMessage: { state: true },
     chatMessages: { state: true },
+    chatVisibleMessageCount: { state: true },
     chatToolMessages: { state: true },
     chatStream: { state: true },
     chatStreamStartedAt: { state: true },
@@ -220,6 +211,10 @@ export class OpenClawApp extends LitElement {
     chatAttachments: { state: true },
     configuredModels: { state: true },
     currentModel: { state: true },
+    dirtyMeterSessions: { state: true },
+    thinkingLevel: { state: true },
+    thinkingLevels: { state: true },
+    isBinaryThinking: { state: true },
     chatManualRefreshInFlight: { state: true },
     sidebarOpen: { state: true },
     sidebarContent: { state: true },
@@ -373,6 +368,7 @@ export class OpenClawApp extends LitElement {
     logsLimit: { state: true },
     logsMaxBytes: { state: true },
     logsAtBottom: { state: true },
+    chatUserNearBottom: { state: true },
     chatNewMessagesBelow: { state: true },
     sharePromptVisible: { state: true },
     sharePromptCopied: { state: true },
@@ -382,10 +378,14 @@ export class OpenClawApp extends LitElement {
     sharePromptText: { state: true },
     sharePromptVersion: { state: true },
     updateBannerState: { state: true },
-    pairingState: { state: true },
-    pairingApproving: { state: true },
-    pairingRejecting: { state: true },
     settingsTabHint: { state: true },
+    settingsNotice: { state: true },
+    showReleaseNotesModal: { state: true },
+    releaseNotesData: { state: true },
+    webbridgeRepairVisible: { state: true },
+    webbridgeRepairBrowserName: { state: true },
+    webbridgeRepairChecking: { state: true },
+    webbridgePillModal: { state: true },
   };
 
   // 兼容 class field 的 define 语义：回灌实例字段到 Lit accessor，恢复响应式更新。
@@ -432,9 +432,15 @@ export class OpenClawApp extends LitElement {
   chatSending = false;
   chatMessage = "";
   chatMessages: unknown[] = [];
+  chatVisibleMessageCount = 0;
   chatToolMessages: unknown[] = [];
   chatStream: string | null = null;
   chatStreamStartedAt: number | null = null;
+  chatHistoryHydrationFrame: number | null = null;
+  chatPendingStreamText: string | null = null;
+  chatStreamFrame: number | null = null;
+  chatStreamFrozenPrefix: string = "";
+  evictedLeadingSegments: Array<{ text: string; ts: number }> = [];
   chatRunId: string | null = null;
   compactionStatus: CompactionStatus | null = null;
   chatAvatarUrl: string | null = null;
@@ -443,6 +449,11 @@ export class OpenClawApp extends LitElement {
   chatAttachments: ChatAttachment[] = [];
   configuredModels: ConfiguredModel[] = [];
   currentModel: string | null = null;
+  dirtyMeterSessions: Set<string> = new Set();
+  meterTotalsBaseline: Map<string, number> = new Map();
+  thinkingLevel: string = "off";
+  thinkingLevels: string[] = [];
+  isBinaryThinking: boolean = false;
   chatManualRefreshInFlight = false;
   // Sidebar state for tool output viewing
   sidebarOpen = false;
@@ -636,7 +647,7 @@ export class OpenClawApp extends LitElement {
   private chatScrollFrame: number | null = null;
   private chatScrollTimeout: number | null = null;
   private chatHasAutoScrolled = false;
-  private chatUserNearBottom = true;
+  chatUserNearBottom = true;
   chatNewMessagesBelow = false;
   sharePromptVisible = false;
   sharePromptCopied = false;
@@ -651,15 +662,27 @@ export class OpenClawApp extends LitElement {
     percent: null,
     showBadge: false,
   };
-  pairingState: OneClawPairingState = {
-    pendingCount: 0,
-    requests: [],
-    updatedAt: Date.now(),
-    channels: {},
-  };
-  pairingApproving = false;
-  pairingRejecting = false;
-  settingsTabHint: "channels" | null = null;
+  settingsTabHint: string | null = null;
+  settingsNotice: string | null = null;
+  showReleaseNotesModal = false;
+  releaseNotesData: ReleaseNotesData | null = null;
+  // 当前是 webbridge 模式 + 浏览器扩展未启用 → 主窗左侧栏显示「连接你的常用浏览器」pill
+  // 用户点 pill → 重跑 needs-repair；扩展已启用则 pill 消失，否则保持
+  // checking 期间图标换成转圈 loader
+  webbridgeRepairVisible = false;
+  webbridgeRepairBrowserName: string | null = null;
+  webbridgeRepairChecking = false;
+  // Pill 修复反馈 modal —— null 隐藏；4 种 kind 决定标题/正文
+  // includesExtension: ready 场景下区分「修复了扩展（提示去启用）」vs「仅装 binary/skill（不提示）」
+  // browserRunning:    ready+includesExtension 场景下决定文案是「请重启」（在跑）还是「请打开」（已关）
+  //                    Chrome 跑着的时候不会主动读新写入的 External JSON，必须重启才会触发"启用扩展"弹窗
+  webbridgePillModal: {
+    kind: "ready" | "browser-running" | "unsupported" | "failed" | "success";
+    browserName?: string;
+    message?: string;
+    includesExtension?: boolean;
+    browserRunning?: boolean;
+  } | null = null;
   private sharePromptSendCount = 0;
   private sharePromptShownVersions = new Set<number>();
   private sharePromptCheckInFlight = false;
@@ -669,7 +692,6 @@ export class OpenClawApp extends LitElement {
   private logsScrollFrame: number | null = null;
   private toolStreamById = new Map<string, ToolStreamEntry>();
   private toolStreamOrder: string[] = [];
-  refreshSessionsAfterChat = new Set<string>();
   basePath = "";
   private popStateHandler = () =>
     onPopStateInternal(this as unknown as Parameters<typeof onPopStateInternal>[0]);
@@ -678,7 +700,8 @@ export class OpenClawApp extends LitElement {
   private topbarObserver: ResizeObserver | null = null;
   private appNavigateCleanup: (() => void) | null = null;
   private updateStateCleanup: (() => void) | null = null;
-  private pairingStateCleanup: (() => void) | null = null;
+  private gatewayReadyCleanup: (() => void) | null = null;
+  private webbridgeStateCleanup: (() => void) | null = null;
 
   createRenderRoot() {
     return this;
@@ -689,7 +712,24 @@ export class OpenClawApp extends LitElement {
     handleConnected(this as unknown as Parameters<typeof handleConnected>[0]);
     this.bindAppNavigation();
     this.bindUpdateState();
-    this.bindPairingState();
+    this.bindGatewayReady();
+    this.bindWebbridgeStateChanged();
+    this.bindWebbridgeRepairPoll();
+    this.fetchReleaseNotes();
+    // 启动时常驻 SSE 订阅 + 拉取 thread 列表（计算"过去未读"），
+    // 让反馈入口红点在任意视图都能反映服务端推送的新消息。
+    initFeedbackBackground(this as unknown as Parameters<typeof initFeedbackBackground>[0]);
+  }
+
+  // 首屏拉取更新日志，有未展示的条目时弹出 modal。
+  private fetchReleaseNotes() {
+    const bridge = this.getOneClawBridge();
+    void bridge?.getReleaseNotes?.().then((data) => {
+      if (data && Array.isArray(data.entries) && data.entries.length > 0) {
+        this.releaseNotesData = data;
+        this.showReleaseNotesModal = true;
+      }
+    }).catch(() => {});
   }
 
   protected firstUpdated() {
@@ -701,14 +741,20 @@ export class OpenClawApp extends LitElement {
     this.appNavigateCleanup = null;
     this.updateStateCleanup?.();
     this.updateStateCleanup = null;
-    this.pairingStateCleanup?.();
-    this.pairingStateCleanup = null;
+    this.gatewayReadyCleanup?.();
+    this.gatewayReadyCleanup = null;
+    this.webbridgeStateCleanup?.();
+    this.webbridgeStateCleanup = null;
     handleDisconnected(this as unknown as Parameters<typeof handleDisconnected>[0]);
     super.disconnectedCallback();
   }
 
   protected updated(changed: Map<PropertyKey, unknown>) {
     handleUpdated(this as unknown as Parameters<typeof handleUpdated>[0], changed);
+    // 从 loadChatHistory 同步 session 级别的 thinkingLevel
+    if (changed.has("chatThinkingLevel")) {
+      this.thinkingLevel = this.chatThinkingLevel ?? "off";
+    }
   }
 
   connect() {
@@ -781,74 +827,6 @@ export class OpenClawApp extends LitElement {
     };
   }
 
-  // 规范化渠道配对状态，避免渲染层处理空值或脏数据。
-  private applyPairingState(payload: OneClawPairingState | null | undefined) {
-    const rawRequests = Array.isArray(payload?.requests) ? payload.requests : [];
-    const requests: OneClawPairingRequest[] = rawRequests
-      .map((item) => ({
-        channel: String(item?.channel ?? "").trim().toLowerCase(),
-        code: String(item?.code ?? "").trim(),
-        id: String(item?.id ?? "").trim(),
-        name: String(item?.name ?? "").trim(),
-        createdAt: String(item?.createdAt ?? ""),
-        lastSeenAt: String(item?.lastSeenAt ?? ""),
-      }))
-      .filter((item) => item.channel.length > 0 && item.code.length > 0);
-    const pendingCountRaw = Number(payload?.pendingCount ?? requests.length);
-    const pendingCount = Number.isFinite(pendingCountRaw) && pendingCountRaw >= 0
-      ? Math.floor(pendingCountRaw)
-      : requests.length;
-    const updatedAtRaw = Number(payload?.updatedAt ?? Date.now());
-    const updatedAt = Number.isFinite(updatedAtRaw) ? updatedAtRaw : Date.now();
-    const rawChannels = payload?.channels && typeof payload.channels === "object"
-      ? payload.channels
-      : {};
-    const channels = Object.fromEntries(
-      Object.entries(rawChannels).map(([channel, item]) => {
-        const channelRequests = Array.isArray(item?.requests) ? item.requests : [];
-        const normalizedRequests: OneClawPairingRequest[] = channelRequests
-          .map((request) => ({
-            channel,
-            code: String(request?.code ?? "").trim(),
-            id: String(request?.id ?? "").trim(),
-            name: String(request?.name ?? "").trim(),
-            createdAt: String(request?.createdAt ?? ""),
-            lastSeenAt: String(request?.lastSeenAt ?? ""),
-          }))
-          .filter((request) => request.code.length > 0);
-        const channelPendingRaw = Number(item?.pendingCount ?? normalizedRequests.length);
-        const channelPendingCount = Number.isFinite(channelPendingRaw) && channelPendingRaw >= 0
-          ? Math.floor(channelPendingRaw)
-          : normalizedRequests.length;
-        const channelUpdatedAtRaw = Number(item?.updatedAt ?? updatedAt);
-        const channelUpdatedAt = Number.isFinite(channelUpdatedAtRaw) ? channelUpdatedAtRaw : updatedAt;
-        const lastAutoApprovedAt = typeof item?.lastAutoApprovedAt === "number" &&
-          Number.isFinite(item.lastAutoApprovedAt)
-          ? item.lastAutoApprovedAt
-          : null;
-        const lastAutoApprovedName = typeof item?.lastAutoApprovedName === "string" &&
-          item.lastAutoApprovedName.trim().length > 0
-          ? item.lastAutoApprovedName.trim()
-          : null;
-        return [channel, {
-          channel,
-          pendingCount: Math.max(channelPendingCount, normalizedRequests.length),
-          requests: normalizedRequests,
-          updatedAt: channelUpdatedAt,
-          lastAutoApprovedAt,
-          lastAutoApprovedName,
-        }];
-      })
-    ) as Record<string, OneClawPairingChannelState>;
-
-    this.pairingState = {
-      pendingCount: Math.max(pendingCount, requests.length),
-      requests,
-      updatedAt,
-      channels,
-    };
-  }
-
   // 订阅主进程更新状态事件，并在首屏主动拉取一次当前状态。
   private bindUpdateState() {
     if (this.updateStateCleanup) {
@@ -868,112 +846,104 @@ export class OpenClawApp extends LitElement {
     }
   }
 
-  // 订阅聊天渠道待审批状态，并在首屏拉取一次快照用于渲染红点与快捷批准入口。
-  private bindPairingState() {
-    if (this.pairingStateCleanup) {
-      return;
-    }
+  // 查 settings:webbridge-needs-repair → 控制左侧栏 pill 可见性 + 默认浏览器名（hover 用）
+  // 触发时机：
+  //   1) app 启动（bindWebbridgeRepairPoll 调一次）
+  //   2) gateway:ready（gateway 重启时即时刷新；见 bindGatewayReady）
+  //   3) webbridge:state-changed（setup-task 装完扩展、settings 修复完成时由主进程广播）
+  //   4) 用户点击 pill（onWebbridgeRepairClick；扩展启用是外部行为，OneClaw 拿不到事件，点一次查一次）
+  private async runWebbridgeRepairTick() {
     const bridge = this.getOneClawBridge();
-    if (bridge?.onPairingState) {
-      const unsubscribe = bridge.onPairingState((payload) => this.applyPairingState(payload));
-      this.pairingStateCleanup = typeof unsubscribe === "function" ? unsubscribe : null;
-    }
-    if (bridge?.getPairingState) {
-      void bridge.getPairingState()
-        .then((payload) => this.applyPairingState(payload))
-        .catch(() => {
-          // ignore preload bridge fetch errors
-        });
-    }
-  }
-
-  // 返回当前首条待审批请求，供快捷批准/拒绝入口复用。
-  private getFirstPendingPairing(): OneClawPairingRequest | null {
-    return this.pairingState.requests[0] ?? null;
-  }
-
-  // 统一根据渠道调用批准 API，并请求主进程立即刷新状态快照。
-  async approveFirstPairing() {
-    if (this.pairingApproving) {
-      return;
-    }
-    const target = this.getFirstPendingPairing();
-    if (!target?.code) {
-      return;
-    }
-    const bridge = this.getOneClawBridge();
-    const approve = target.channel === "wecom"
-      ? bridge?.settingsApproveWecomPairing
-      : bridge?.settingsApproveFeishuPairing;
-    if (!approve) {
-      return;
-    }
-
-    this.pairingApproving = true;
+    if (!bridge?.settingsWebbridgeNeedsRepair) return;
     try {
-      const result = await approve({
-        code: target.code,
-        id: target.id,
-        name: target.name,
-      });
-      if (!result?.success) {
-        this.lastError = result?.message || t("pairing.approveFailed");
-        return;
+      const r = await bridge.settingsWebbridgeNeedsRepair();
+      const data = r?.success ? r?.data : undefined;
+      const visible = !!data?.visible;
+      const browserName = data?.defaultBrowser?.name ?? null;
+      if (visible !== this.webbridgeRepairVisible) {
+        this.webbridgeRepairVisible = visible;
       }
-      bridge.refreshPairingState?.();
-    } catch (err: any) {
-      this.lastError = t("pairing.approveFailed") + (err?.message ? `: ${err.message}` : "");
-    } finally {
-      this.pairingApproving = false;
+      if (browserName !== this.webbridgeRepairBrowserName) {
+        this.webbridgeRepairBrowserName = browserName;
+      }
+    } catch {
+      // 静默失败：不打扰用户
     }
   }
 
-  // 统一根据渠道调用拒绝 API（本地忽略该配对码），并请求主进程刷新状态。
-  async rejectFirstPairing() {
-    if (this.pairingRejecting) {
-      return;
-    }
-    const target = this.getFirstPendingPairing();
-    if (!target?.code) {
-      return;
-    }
-    const bridge = this.getOneClawBridge();
-    const reject = target.channel === "wecom"
-      ? bridge?.settingsRejectWecomPairing
-      : bridge?.settingsRejectFeishuPairing;
-    if (!reject) {
-      return;
-    }
-
-    this.pairingRejecting = true;
+  // pill 点击 → checking=true 显示转圈 → 跑主动修复 → 根据 code 给反馈 → 重查 needs-repair
+  // 修复路径：浏览器关 → 自动清 blocklist + 写 External JSON → alert 提示打开浏览器看启用提示
+  // 浏览器在跑 → alert 提示用户先关浏览器
+  async onWebbridgeRepairClick() {
+    if (this.webbridgeRepairChecking) return;
+    this.webbridgeRepairChecking = true;
     try {
-      const result = await reject({
-        code: target.code,
-        id: target.id,
-        name: target.name,
-      });
-      if (!result?.success) {
-        this.lastError = result?.message || t("pairing.rejectFailed");
-        return;
+      const bridge = this.getOneClawBridge();
+      if (bridge?.settingsWebbridgePillRepair) {
+        const r = await bridge.settingsWebbridgePillRepair();
+        const browserName = r?.browserName ?? this.webbridgeRepairBrowserName ?? "Chrome";
+        if (r?.success && r.code === "READY") {
+          // 主进程已经主动打开浏览器+引导页 → 不弹 modal，避免和浏览器里的引导页冗余
+          if (r.openedBrowser === true) {
+            // pill 仍由 needs-repair tick 控制——用户在浏览器启用扩展后下次 tick 自动消失
+          } else {
+            this.webbridgePillModal = {
+              kind: "ready",
+              browserName,
+              includesExtension: r.includesExtension === true,
+              browserRunning: r.browserRunning === true,
+            };
+          }
+        } else if (r?.success && r.code === "ALREADY_OK") {
+          // 三组件都 OK 且用户已在浏览器点过「启用扩展」——给一个明确的成功反馈
+          // pill 会被随后的 tick 隐藏；这条 modal 是用户的"修复确认信号"
+          this.webbridgePillModal = { kind: "success", browserName };
+        } else if (r?.code === "BROWSER_RUNNING") {
+          this.webbridgePillModal = { kind: "browser-running", browserName };
+        } else if (r?.code === "DEFAULT_BROWSER_UNSUPPORTED") {
+          this.webbridgePillModal = { kind: "unsupported" };
+        } else {
+          this.webbridgePillModal = { kind: "failed", message: r?.message };
+        }
       }
-      bridge.refreshPairingState?.();
-    } catch (err: any) {
-      this.lastError = t("pairing.rejectFailed") + (err?.message ? `: ${err.message}` : "");
+      // 修复后重查一次 needs-repair——若扩展真启用了 pill 自然消失
+      await this.runWebbridgeRepairTick();
     } finally {
-      this.pairingRejecting = false;
+      this.webbridgeRepairChecking = false;
     }
   }
 
-  // 通知可见性：只要还有待审批请求就持续显示。
-  shouldShowPairingNotice(): boolean {
-    return this.pairingState.pendingCount > 0;
+  private bindWebbridgeRepairPoll() {
+    void this.runWebbridgeRepairTick();
   }
 
-  // 返回当前待审批来源的可读渠道名。
-  getPendingPairingChannelLabel(): string {
-    const first = this.getFirstPendingPairing();
-    const channel = first?.channel === "wecom" ? "wecom" : "feishu";
-    return t(`pairing.channel.${channel}`);
+  // 主进程通知 webbridge precheck 状态可能已变（setup 后台 task 装完扩展，或 settings 修复完成）
+  // 不重启 gateway 的场景下专用——避免 pill 卡在 app 启动那次 tick 的旧结果
+  private bindWebbridgeStateChanged() {
+    if (this.webbridgeStateCleanup) return;
+    const bridge = this.getOneClawBridge();
+    if (bridge?.onWebbridgeStateChanged) {
+      const unsubscribe = bridge.onWebbridgeStateChanged(() => {
+        void this.runWebbridgeRepairTick();
+      });
+      this.webbridgeStateCleanup = typeof unsubscribe === "function" ? unsubscribe : null;
+    }
+  }
+
+  // 主进程通知 gateway 已就绪，立即重连（跳过指数退避盲等）
+  // 同时触发 webbridge precheck 重查——修复并启用会重启 gateway，借此事件即时刷新 pill
+  private bindGatewayReady() {
+    if (this.gatewayReadyCleanup) return;
+    const bridge = this.getOneClawBridge();
+    if (bridge?.onGatewayReady) {
+      const unsubscribe = bridge.onGatewayReady(() => {
+        if (!this.connected && this.client) {
+          this.client.reconnectNow();
+        }
+        void this.runWebbridgeRepairTick();
+      });
+      this.gatewayReadyCleanup = typeof unsubscribe === "function" ? unsubscribe : null;
+    }
   }
 
   private bindAppNavigation() {
@@ -985,16 +955,46 @@ export class OpenClawApp extends LitElement {
       return;
     }
     const unsubscribe = bridge.onNavigate((payload) => {
-      if (payload?.view !== "settings") {
+      // Any view transition away from setup must clear inSetupView on main process
+      if (payload?.view !== "setup") {
+        bridge.reportSetupViewState?.(false);
+      }
+
+      if (payload?.view === "setup") {
+        bridge.reportSetupViewState?.(true);
+        this.applySettings({
+          ...this.settings,
+          oneclawView: "setup",
+        });
         return;
       }
-      // 外部触发打开设置时，若存在待审批请求，默认引导到聊天集成页。
-      this.settingsTabHint = this.pairingState.pendingCount > 0 ? "channels" : null;
-      this.applySettings({
-        ...this.settings,
-        oneclawView: "settings",
-        navCollapsed: false,
-      });
+      if (payload?.view === "chat") {
+        const wasSetup = this.settings.oneclawView === "setup";
+        // Setup→Chat 转换时，主进程注入最新 gateway token 避免使用旧 token
+        const updates: Record<string, unknown> = { oneclawView: "chat" };
+        if (payload.token) {
+          updates.token = payload.token;
+        }
+        this.applySettings({
+          ...this.settings,
+          ...updates,
+        });
+        // Transitioning from setup → chat: gateway wasn't connected yet, start now.
+        if (wasSetup) {
+          deferredGatewayConnect(this as unknown as Parameters<typeof deferredGatewayConnect>[0]);
+        }
+        return;
+      }
+      if (payload?.view === "settings") {
+        // 外部触发打开设置时，优先使用 payload 指定的 tab（如恢复流程 → backup）。
+        this.settingsTabHint = payload.settingsTab ?? null;
+        this.settingsNotice = payload.settingsNotice ?? null;
+        this.applySettings({
+          ...this.settings,
+          oneclawView: "settings",
+          navCollapsed: false,
+        });
+      }
     });
     this.appNavigateCleanup = typeof unsubscribe === "function" ? unsubscribe : null;
   }
@@ -1042,6 +1042,7 @@ export class OpenClawApp extends LitElement {
         const defaultModel = this.configuredModels.find((m) => m.isDefault);
         this.currentModel = defaultModel?.key ?? this.configuredModels[0].key;
       }
+      this.updateThinkingCapabilities();
     } catch {
       this.configuredModels = [];
     }
@@ -1053,14 +1054,25 @@ export class OpenClawApp extends LitElement {
     if (!this.client || !this.connected) {
       return;
     }
+    // 切完模型先冻结 context meter；下一轮 usage 落库（totalTokens 单调推进）后由
+    // app-gateway 的 usage 刷新清除。重新赋值以触发 Lit reactive 更新。
+    const sessionKey = this.sessionKey;
+    const currentTotal = this.sessionsResult?.sessions?.find(
+      (r) => r.key === sessionKey,
+    )?.totalTokens ?? 0;
+    const nextDirty = new Set(this.dirtyMeterSessions);
+    markSessionMeterDirty(nextDirty, sessionKey);
+    this.dirtyMeterSessions = nextDirty;
+    this.meterTotalsBaseline.set(sessionKey, currentTotal);
     try {
       await this.client.request("sessions.patch", {
-        key: this.sessionKey,
+        key: sessionKey,
         model: modelKey,
       });
     } catch (err) {
       this.lastError = String(err);
     }
+    this.updateThinkingCapabilities();
   }
 
   // 重置模型选择为默认值（新建 session 时调用）
@@ -1070,6 +1082,75 @@ export class OpenClawApp extends LitElement {
       this.currentModel = defaultModel?.key ?? this.configuredModels[0].key;
     } else {
       this.currentModel = null;
+    }
+    this.thinkingLevel = "off";
+    this.updateThinkingCapabilities();
+  }
+
+  // 根据当前模型的 provider 计算支持的思考级别
+  updateThinkingCapabilities() {
+    const model = this.configuredModels.find(m => m.key === this.currentModel);
+    if (!model) {
+      this.thinkingLevels = [];
+      this.isBinaryThinking = false;
+      return;
+    }
+    const provider = model.provider?.toLowerCase() ?? "";
+    const normalizedProvider = (provider === "z.ai" || provider === "z-ai") ? "zai" : provider;
+    if (normalizedProvider === "zai") {
+      this.thinkingLevels = ["off", "on"];
+      this.isBinaryThinking = true;
+    } else {
+      // 保守默认级别，不包含 xhigh（需要模型明确支持）
+      const levels = ["off", "low", "medium", "high"];
+      const modelId = model.key.split("/").pop() ?? "";
+      if (/claude-(opus|sonnet)-4/.test(modelId)) {
+        levels.push("adaptive");
+      }
+      this.thinkingLevels = levels;
+      this.isBinaryThinking = false;
+    }
+    if (this.thinkingLevel !== "off" && !this.thinkingLevels.includes(this.thinkingLevel)) {
+      this.thinkingLevel = "off";
+      this.patchSessionThinkingLevel("off");
+    }
+  }
+
+  // 解析智能默认思考级别
+  resolveDefaultThinkLevel(): string {
+    const model = this.configuredModels.find(m => m.key === this.currentModel);
+    if (!model) return "medium";
+    const provider = model.provider?.toLowerCase() ?? "";
+    const normalizedProvider = (provider === "z.ai" || provider === "z-ai") ? "zai" : provider;
+    if (normalizedProvider === "zai") return "on";
+    const modelId = model.key.split("/").pop() ?? "";
+    if (/claude-(opus|sonnet)-4/.test(modelId)) return "adaptive";
+    return "medium";
+  }
+
+  // 切换思考开关
+  async handleThinkingToggle() {
+    const next = this.thinkingLevel === "off" ? this.resolveDefaultThinkLevel() : "off";
+    this.thinkingLevel = next;
+    await this.patchSessionThinkingLevel(next);
+  }
+
+  // 选择具体思考级别
+  async handleThinkingLevelChange(level: string) {
+    this.thinkingLevel = level;
+    await this.patchSessionThinkingLevel(level);
+  }
+
+  // 通过 sessions.patch RPC 持久化
+  private async patchSessionThinkingLevel(level: string) {
+    if (!this.client || !this.connected) return;
+    try {
+      await this.client.request("sessions.patch", {
+        key: this.sessionKey,
+        thinkingLevel: level,
+      });
+    } catch (err) {
+      this.lastError = String(err);
     }
   }
 
@@ -1258,6 +1339,16 @@ export class OpenClawApp extends LitElement {
     this.sharePromptCopied = false;
     this.sharePromptCopyError = null;
     this.sharePromptVersion = null;
+  }
+
+  // 关闭更新日志弹窗，并记录当前版本为已展示。
+  dismissReleaseNotes() {
+    this.showReleaseNotesModal = false;
+    const version = this.releaseNotesData?.currentVersion;
+    if (version) {
+      const bridge = this.getOneClawBridge();
+      void bridge?.dismissReleaseNotes?.(version).catch(() => {});
+    }
   }
 
   async handleSharePromptCopy() {

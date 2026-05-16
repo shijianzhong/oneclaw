@@ -8,12 +8,11 @@ directories:
 files:
   - dist/**/*
   - chat-ui/dist/**/*
-  - live2d/**/*
-  - setup/**/*
-  - settings/**/*
+  - shared/**/*
   - assets/**/*
-  - resources/live2d/**/*
+  - setup/**/*
   - package.json
+  - release-notes.json
 
 # sherpa-onnx / naudiodon2 的 native .node 文件需要解出 asar
 asarUnpack:
@@ -47,6 +46,9 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
   notarize: true
+  extraResources:
+    - from: "resources/targets/darwin-${arch}/officecli"
+      to: "resources/officecli"
 
 # 自动更新：指向阿里云 CDN
 publish:
@@ -63,13 +65,19 @@ dmg:
 win:
   target: nsis
   icon: assets/icon.ico
+  extraResources:
+    - from: "resources/targets/win32-${arch}/officecli"
+      to: "resources/officecli"
 
 nsis:
-  oneClick: true
+  oneClick: false
   perMachine: false
+  # 允许用户自选安装目录
+  allowToChangeInstallationDirectory: true
   # 安装前强制终止旧进程，避免托盘模式下 WM_CLOSE 被拦截
   include: "scripts/installer.nsh"
-  createDesktopShortcut: true
+  # "always" 确保更新安装时也重新创建快捷方式（默认 true 只在首次安装创建）
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   runAfterFinish: true
   # 关闭 NSIS 差分包，避免生成 .exe.blockmap

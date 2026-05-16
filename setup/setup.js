@@ -11,6 +11,7 @@
       placeholder: "sk-ant-...",
       platformUrl: "https://console.anthropic.com?utm_source=oneclaw",
       models: [
+        "claude-opus-4-7",
         "claude-sonnet-4-6",
         "claude-opus-4-6",
         "claude-sonnet-4-5-20250929",
@@ -20,13 +21,13 @@
     },
     moonshot: {
       placeholder: "sk-...",
-      models: ["kimi-k2.5", "kimi-k2-0905-preview"],
+      models: ["kimi-k2.6", "kimi-k2.5", "kimi-k2-0905-preview"],
       hasSubPlatform: true,
     },
     openai: {
       placeholder: "sk-...",
       platformUrl: "https://platform.openai.com?utm_source=oneclaw",
-      models: ["gpt-5.4", "gpt-5.2", "gpt-5.2-codex"],
+      models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.2-codex"],
     },
     google: {
       placeholder: "AI...",
@@ -41,40 +42,40 @@
 
   // Moonshot 子平台各自的 URL
   const SUB_PLATFORM_URLS = {
-    "moonshot-cn": "https://platform.moonshot.cn?utm_source=oneclaw",
+    "moonshot-cn": "https://platform.kimi.com?utm_source=oneclaw",
     "moonshot-ai": "https://platform.moonshot.ai?utm_source=oneclaw",
     "kimi-code": "https://kimi.com/code?utm_source=oneclaw",
   };
 
   // Kimi Code 子平台使用独立模型列表
-  const KIMI_CODE_MODELS = ["k2p5"];
+  const KIMI_CODE_MODELS = ["kimi-for-coding"];
 
   // Custom tab 内置预设
   const CUSTOM_PRESETS = {
     "minimax": {
       providerKey: "minimax",
       placeholder: "eyJ...",
-      models: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+      models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
     },
     "minimax-cn": {
       providerKey: "minimax-cn",
       placeholder: "eyJ...",
-      models: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+      models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
     },
     "zai-global": {
-      providerKey: "zai",
+      providerKey: "zai-global",
       placeholder: "...",
-      models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+      models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
     },
     "zai-cn": {
-      providerKey: "zai",
+      providerKey: "zai-cn",
       placeholder: "...",
-      models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+      models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
     },
     "zai-cn-coding": {
-      providerKey: "zai",
+      providerKey: "zai-cn-coding",
       placeholder: "...",
-      models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+      models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
     },
     "volcengine": {
       providerKey: "volcengine",
@@ -82,19 +83,19 @@
       models: ["doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-2.0-code", "doubao-seed-code"],
     },
     "volcengine-coding": {
-      providerKey: "volcengine",
+      providerKey: "volcengine-coding",
       placeholder: "...",
-      models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-code", "minimax-m2.5", "glm-4.7", "deepseek-v3.2", "kimi-k2.5", "ark-code-latest"],
+      models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-code", "minimax-m2.7", "glm-5.1", "deepseek-v3.2", "kimi-k2.6", "ark-code-latest"],
     },
     "qwen": {
       providerKey: "qwen",
       placeholder: "sk-...",
-      models: ["qwen-coder-plus-latest", "qwen-plus-latest", "qwen-max-latest", "qwen-turbo-latest"],
+      models: ["qwen3.6-max-preview", "qwen3.6-plus", "qwen-coder-plus-latest", "qwen-plus-latest", "qwen-max-latest", "qwen-turbo-latest"],
     },
     "qwen-coding": {
-      providerKey: "qwen",
+      providerKey: "qwen-coding",
       placeholder: "sk-sp-...",
-      models: ["qwen3.5-plus", "kimi-k2.5", "glm-5", "MiniMax-M2.5",],
+      models: ["qwen3.6-plus", "qwen3.5-plus", "kimi-k2.6", "glm-5.1", "MiniMax-M2.7"],
     },
     "deepseek": {
       providerKey: "deepseek",
@@ -110,7 +111,7 @@
       "welcome.title": "Welcome to OneClaw",
       "welcome.subtitle": "OneClaw is a one-click installer for OpenClaw",
       "welcome.feat2": "OpenClaw can access files on your computer and automate tasks",
-      "welcome.feat3": "Connect to Feishu, WeCom, DingTalk, QQ Bot",
+      "welcome.feat3": "Connect to WeChat, Feishu, WeCom, DingTalk, QQ Bot",
       "welcome.security": "API keys stored locally, never sent to third-party servers",
       "welcome.warning": "OpenClaw has high system privileges and can control your computer — please use it responsibly",
       "welcome.next": "Next",
@@ -155,12 +156,9 @@
       "done.installCli": "Add openclaw command to terminal PATH",
       "done.start": "Start OneClaw",
       "done.starting": "Starting Gateway…",
-      "done.retryPort": "Try a different port",
-      "done.retryPortStarting": "Switching port…",
-      "done.retryPortSuccess": "Switched to port {port}, restarting…",
       "done.startFailed": "Gateway failed to start — please click Start OneClaw to retry",
       "conflict.title": "Existing OpenClaw Detected",
-      "conflict.subtitle": "An existing OpenClaw installation was found on your system, which may cause port conflicts with OneClaw",
+      "conflict.subtitle": "OneClaw will take over this installation automatically",
       "conflict.reassure": "Your personas and chat history will be preserved",
       "conflict.portInUse": "Port {port} is in use by process: {process} (PID: {pid})",
       "conflict.globalInstalled": "Global installation found: {path}",
@@ -179,7 +177,7 @@
       "welcome.title": "欢迎使用 OneClaw",
       "welcome.subtitle": "OneClaw 是 OpenClaw 的一键安装包",
       "welcome.feat2": "OpenClaw 可以访问电脑上的文件，自动执行各种办公任务",
-      "welcome.feat3": "连接飞书、企业微信、钉钉、QQ 机器人",
+      "welcome.feat3": "连接微信、飞书、企业微信、钉钉、QQ 机器人",
       "welcome.security": "API 密钥安全存储在本地 绝不会发送到任何第三方服务器",
       "welcome.warning": "OpenClaw 权限非常高 可以控制本地电脑 请注意使用安全",
       "welcome.next": "下一步",
@@ -224,12 +222,9 @@
       "done.installCli": "将 openclaw 命令添加到终端 PATH",
       "done.start": "启动 OneClaw",
       "done.starting": "正在启动 Gateway…",
-      "done.retryPort": "换个端口试试",
-      "done.retryPortStarting": "正在切换端口…",
-      "done.retryPortSuccess": "已切换到端口 {port}，正在重启…",
       "done.startFailed": 'Gateway 启动失败 请点击"启动 OneClaw"重试',
       "conflict.title": "检测到已安装的 OpenClaw",
-      "conflict.subtitle": "系统中已存在 OpenClaw 安装 可能与 OneClaw 产生端口冲突",
+      "conflict.subtitle": "OneClaw 将自动接管此安装",
       "conflict.reassure": "你的人设和聊天记录将会被保留",
       "conflict.portInUse": "端口 {port} 被占用，进程: {process} (PID: {pid})",
       "conflict.globalInstalled": "全局安装路径: {path}",
@@ -307,9 +302,6 @@
     doneStatus: $("#doneStatus"),
     launchAtLoginRow: $("#launchAtLoginRow"),
     launchAtLoginEnabled: $("#launchAtLoginEnabled"),
-    btnRetryPort: $("#btnRetryPort"),
-    btnRetryPortText: document.querySelector("#btnRetryPort .btn-text"),
-    btnRetryPortSpinner: document.querySelector("#btnRetryPort .btn-spinner"),
   };
 
   // ---- 状态 ----
@@ -651,8 +643,8 @@
 
       // OAuth 成功 → 先验证 token 是否有会员权限
       var modelID = els.modelSelect.value === CUSTOM_MODEL_SENTINEL
-        ? (els.customModelInput.value || "").trim() || "k2p5"
-        : els.modelSelect.value || "k2p5";
+        ? (els.customModelInput.value || "").trim() || "kimi-for-coding"
+        : els.modelSelect.value || "kimi-for-coding";
 
       var verifyResult = await window.oneclaw.verifyKey({
         provider: "moonshot",
@@ -845,55 +837,10 @@
       if (!result || !result.success) {
         setStarting(false);
         setDoneStatus(result?.message || t("done.startFailed"), true);
-        showRetryPortButton();
       }
     } catch (err) {
       setStarting(false);
       setDoneStatus((err && err.message) || t("done.startFailed"), true);
-      showRetryPortButton();
-    }
-  }
-
-  // 显示换端口重试按钮
-  function showRetryPortButton() {
-    if (window.oneclaw?.retryRandomPort) {
-      els.btnRetryPort.classList.remove("hidden");
-    }
-  }
-
-  // 换随机端口重试
-  async function handleRetryPort() {
-    if (starting) return;
-
-    els.btnRetryPort.disabled = true;
-    els.btnRetryPortText.textContent = t("done.retryPortStarting");
-    els.btnRetryPortSpinner.classList.remove("hidden");
-    setDoneStatus("");
-
-    try {
-      const portResult = await window.oneclaw.retryRandomPort();
-      if (!portResult || !portResult.success) {
-        setDoneStatus(portResult?.message || t("done.startFailed"), true);
-        els.btnRetryPort.disabled = false;
-        els.btnRetryPortText.textContent = t("done.retryPort");
-        els.btnRetryPortSpinner.classList.add("hidden");
-        return;
-      }
-
-      // 端口切换成功，提示并自动重试启动
-      setDoneStatus(t("done.retryPortSuccess").replace("{port}", String(portResult.port)));
-      els.btnRetryPort.classList.add("hidden");
-      els.btnRetryPortText.textContent = t("done.retryPort");
-      els.btnRetryPortSpinner.classList.add("hidden");
-      els.btnRetryPort.disabled = false;
-
-      // 自动触发启动
-      handleComplete();
-    } catch (err) {
-      setDoneStatus((err && err.message) || t("done.startFailed"), true);
-      els.btnRetryPort.disabled = false;
-      els.btnRetryPortText.textContent = t("done.retryPort");
-      els.btnRetryPortSpinner.classList.add("hidden");
     }
   }
 
@@ -1046,7 +993,6 @@
 
     // Step 3 — 完成
     els.btnStart.addEventListener("click", handleComplete);
-    els.btnRetryPort.addEventListener("click", handleRetryPort);
   }
 
   // ---- 初始化 ----

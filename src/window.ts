@@ -1,8 +1,9 @@
 import { BrowserWindow, app, globalShortcut } from "electron";
 import * as path from "path";
 import * as log from "./logger";
+import { buildChatUiEntryUrl } from "./chat-ui-entry-url";
 import { shouldHideWindowOnClose } from "./window-close-policy";
-import type { PairingState } from "./channel-pairing-monitor";
+import * as analytics from "./analytics";
 import type { UpdateBannerState } from "./update-banner-state";
 import {
   WINDOW_WIDTH,
@@ -10,23 +11,32 @@ import {
   WINDOW_MIN_WIDTH,
   WINDOW_MIN_HEIGHT,
   resolveChatUiPath,
+  resolveDevBranchTag,
 } from "./constants";
 
 interface ShowOptions {
   port: number;
   token?: string;
   onboarding?: boolean;
+  initialView?: "setup" | "chat";
 }
 
 interface NavigateOptions {
-  view: "settings";
+  view: "settings" | "setup" | "chat";
+  /** When view=settings, optionally pre-select a tab */
+  settingsTab?: string;
+  /** When view=settings, optionally show a notice on the target tab */
+  settingsNotice?: string;
+  /** Fresh gateway auth token — sent on setup→chat transition so renderer doesn't use stale token */
+  token?: string;
 }
 
 function resolveMainWindowTitle(): string {
+  const tag = resolveDevBranchTag();
   // 主窗口标题直接解释产品定位，方便用户在系统标题栏里理解 OneClaw 是什么。
   return app.getLocale().startsWith("zh")
-    ? "OneClaw 一键安装OpenClaw"
-    : "OneClaw - One-click installer for OpenClaw";
+    ? `OneClaw 一键安装OpenClaw${tag}`
+    : `OneClaw - One-click installer for OpenClaw${tag}`;
 }
 
 function maskToken(token: string): string {
@@ -39,14 +49,12 @@ function maskToken(token: string): string {
 export class WindowManager {
   private win: BrowserWindow | null = null;
   private allowAppQuit = false;
-  private onShowCallback?: () => void;
-  private onHideCallback?: () => void;
-
-  // 设置窗口显示/隐藏回调（用于 Live2D 互斥联动）
-  setCallbacks(opts: { onShow?: () => void; onHide?: () => void }): void {
-    this.onShowCallback = opts.onShow;
-    this.onHideCallback = opts.onHide;
-  }
+  inSetupView = false;
+  /** True from initial setup launch until setup:complete succeeds. Unlike
+   *  inSetupView (tracks which view is currently displayed), this flag
+   *  persists across view transitions so the close-policy always forces
+   *  quit and openSettings is blocked until setup finishes. */
+  setupPending = false;
 
   // 显示主窗口（加载 Chat UI）
   async show(opts: ShowOptions): Promise<void> {
@@ -127,9 +135,16 @@ export class WindowManager {
       log.warn("窗口无响应");
     });
 
-    // 关闭 → 普通场景隐藏到托盘；退出/更新场景放行关闭
+    // 关闭 → Setup 未完成/退出流程放行关闭；普通场景隐藏到托盘
     this.win.on("close", (e) => {
-      if (!shouldHideWindowOnClose({ allowAppQuit: this.allowAppQuit })) return;
+      if (!shouldHideWindowOnClose({ allowAppQuit: this.allowAppQuit, setupPending: this.setupPending })) {
+        if (this.setupPending) {
+          // Setup 未完成时关闭 = 退出应用（即使当前显示的不是 setup 视图）
+          analytics.trackSetupAbandoned({ trigger: "window_close" });
+          app.quit();
+        }
+        return;
+      }
       e.preventDefault();
       this.win?.hide();
       this.onHideCallback?.();
@@ -140,30 +155,23 @@ export class WindowManager {
       this.allowAppQuit = false;
     });
 
-    // 加载本地 chat-ui/dist/index.html
-    // 分两步：先加载页面建立 file:// 源，注入 localStorage，再 reload 让 app 读到正确配置。
-    // 窗口此时 show=false，用户看不到中间态。
+    // 首屏 Setup 必须在首个 URL 里直接生效，避免 renderer 先画 chat 再被纠正。
+    if (opts.initialView === "setup") {
+      this.inSetupView = true;
+      this.setupPending = true;
+    }
+
+    // 首次加载直接带上 gateway 参数，避免双次 loadFile 触发两套 renderer 初始化。
     const chatUiIndex = resolveChatUiPath();
-    log.info(`准备加载 Chat UI 路径: ${chatUiIndex}`);
+    const chatUiEntryUrl = buildChatUiEntryUrl(chatUiIndex, opts);
+    log.info(`准备加载 Chat UI: ${chatUiEntryUrl}`);
     try {
-      await this.win.loadFile(chatUiIndex);
+      await this.win.loadURL(chatUiEntryUrl);
     } catch (err) {
-      log.error(`Chat UI 加载失败: path=${chatUiIndex} err=${err}`);
+      log.error(`Chat UI 加载失败: url=${chatUiEntryUrl} err=${err}`);
       await this.loadChatUiErrorPage();
       this.win.show();
       return;
-    }
-
-    // 注入 gateway 连接信息到 localStorage，然后 reload 让 app 重新初始化
-    if (opts.token) {
-      log.info(`准备注入 Gateway 设置: url=ws://127.0.0.1:${opts.port} token=${maskToken(opts.token)}`);
-      await this.injectGatewaySettings(opts.port, opts.token);
-      try {
-        log.info(`注入后重载 Chat UI: ${chatUiIndex}`);
-        await this.win.loadFile(chatUiIndex);
-      } catch (err) {
-        log.error(`Chat UI reload 失败: ${err}`);
-      }
     }
 
     this.win.show();
@@ -176,6 +184,17 @@ export class WindowManager {
 
   // 显示主窗口并切换到内嵌设置页
   async openSettings(opts: ShowOptions): Promise<void> {
+    // Setup 未完成时禁止打开 Settings，强制回到 Setup 视图
+    if (this.setupPending) {
+      log.info("openSettings 被阻止: setup 尚未完成，强制导航到 setup");
+      await this.show(opts);
+      if (this.win && !this.win.isDestroyed()) {
+        this.win.show();
+        this.win.focus();
+        this.navigate({ view: "setup" });
+      }
+      return;
+    }
     await this.show(opts);
     if (!this.win || this.win.isDestroyed()) {
       return;
@@ -297,18 +316,6 @@ export class WindowManager {
     this.win.webContents.send("app:update-state", state);
   }
 
-  // 向渲染层广播聊天渠道待审批状态（若窗口存在）。
-  pushPairingState(state: PairingState): void {
-    if (!this.win || this.win.isDestroyed()) {
-      return;
-    }
-    this.win.webContents.send("app:pairing-state", state);
-    const feishuState = state.channels.feishu;
-    if (feishuState) {
-      this.win.webContents.send("app:feishu-pairing-state", feishuState);
-    }
-  }
-
   // 销毁窗口（应用退出前调用）
   destroy(): void {
     if (!this.win || this.win.isDestroyed()) return;
@@ -318,34 +325,19 @@ export class WindowManager {
   }
 
   // 通知渲染进程执行应用内导航
-  private navigate(payload: NavigateOptions): void {
+  navigate(payload: NavigateOptions): void {
     if (!this.win || this.win.isDestroyed()) {
       return;
     }
     this.win.webContents.send("app:navigate", payload);
   }
 
-  // 注入 gateway URL 和 token 到 localStorage，Chat UI 的 gateway.ts 会读取
-  private async injectGatewaySettings(port: number, token: string): Promise<void> {
-    const escaped = token.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const gatewayUrl = `ws://127.0.0.1:${port}`;
-    try {
-      await this.win!.webContents.executeJavaScript(`
-        (() => {
-          const key = "openclaw.control.settings.v1";
-          const raw = localStorage.getItem(key);
-          const s = raw ? JSON.parse(raw) : {};
-          s.token = "${escaped}";
-          s.gatewayUrl = "${gatewayUrl}";
-          localStorage.setItem(key, JSON.stringify(s));
-        })();
-      `);
-      log.info(
-        `gateway settings 已注入: key=openclaw.control.settings.v1 token=${maskToken(token)} url=${gatewayUrl}`,
-      );
-    } catch (err) {
-      log.error(`gateway settings 注入失败: ${err}`);
+  // 通知渲染进程 Settings 视图内导航（tab 切换 + notice）
+  sendSettingsNavigate(payload: { tab: string; notice?: string }): void {
+    if (!this.win || this.win.isDestroyed()) {
+      return;
     }
+    this.win.webContents.send("settings:navigate", payload);
   }
 
   // Chat UI 加载失败时的错误页

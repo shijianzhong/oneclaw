@@ -40,6 +40,42 @@ test("saveQqbotConfig 启用时应写入插件开关并保留 allowFrom", () => 
   assert.equal("clientSecretFile" in config.channels.qqbot, false);
 });
 
+test("saveQqbotConfig 启用时应将 qqbot 追加到非空 plugins.allow", () => {
+  const config: Record<string, any> = {
+    plugins: {
+      allow: ["wecom-openclaw-plugin"],
+      entries: {},
+    },
+    channels: {},
+  };
+
+  saveQqbotConfig(config, {
+    enabled: true,
+    appId: "1024",
+    clientSecret: "secret-1",
+  });
+
+  assert.deepEqual(config.plugins.allow, ["wecom-openclaw-plugin", "qqbot"]);
+});
+
+test("saveQqbotConfig 重复启用时不应在 plugins.allow 中产生重复项", () => {
+  const config: Record<string, any> = {
+    plugins: {
+      allow: ["wecom-openclaw-plugin", "qqbot"],
+      entries: {},
+    },
+    channels: {},
+  };
+
+  saveQqbotConfig(config, {
+    enabled: true,
+    appId: "1024",
+    clientSecret: "secret-1",
+  });
+
+  assert.deepEqual(config.plugins.allow, ["wecom-openclaw-plugin", "qqbot"]);
+});
+
 test("saveQqbotConfig 禁用时应保留凭据并仅关闭开关", () => {
   // 禁用不应抹掉用户已保存的 QQ 凭据，便于再次启用。
   const config: Record<string, any> = {
@@ -66,7 +102,7 @@ test("saveQqbotConfig 禁用时应保留凭据并仅关闭开关", () => {
 });
 
 test("extractQqbotConfig 应回显基础字段并兜底 markdownSupport 默认值", () => {
-  // 未显式关闭 markdown 时，设置页默认展示为开启。
+  // 未显式开启 markdown 时，默认关闭。
   const extracted = extractQqbotConfig({
     plugins: {
       entries: {
@@ -85,6 +121,6 @@ test("extractQqbotConfig 应回显基础字段并兜底 markdownSupport 默认�
     enabled: true,
     appId: "4096",
     clientSecret: "secret-3",
-    markdownSupport: true,
+    markdownSupport: false,
   });
 });

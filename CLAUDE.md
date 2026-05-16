@@ -1,8 +1,12 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # OneClaw — Electron Shell for openclaw
 
 ## What This Project Is
 
-OneClaw is a cross-platform desktop app that wraps the [openclaw](https://github.com/anthropics/claude-code) gateway into a standalone installable package. It ships a bundled Node.js 22 runtime and the openclaw npm package, so users need zero dev tooling — just install and run.
+OneClaw is a cross-platform desktop app that wraps the [openclaw](https://github.com/openclaw/openclaw) gateway into a standalone installable package. It ships a bundled Node.js 22 runtime and the openclaw npm package, so users need zero dev tooling — just install and run.
 
 **Three-process architecture:**
 
@@ -38,21 +42,16 @@ The main process spawns a gateway subprocess, waits for its health check, then o
 
 ```
 oneclaw/
-├── src/                    # 35 TypeScript modules (10032 LOC) + 13 test files
+├── src/                    # 40 TypeScript modules (13416 LOC) + 14 test files (node:test)
 │   ├── main.ts             # App entry, lifecycle, IPC, Dock toggle, config recovery
-│   ├── constants.ts        # Path resolution (dev vs packaged), health check params
+│   ├── constants.ts        # Path resolution (dev vs packaged vs ASAR), health check params
 │   ├── gateway-process.ts  # Child process state machine + diagnostics
 │   ├── gateway-auth.ts     # Auth token read/generate/persist
 │   ├── gateway-rpc.ts      # WebSocket RPC client for main↔gateway communication
 │   ├── window.ts           # BrowserWindow lifecycle, token injection, chat message injection
 │   ├── window-close-policy.ts  # Close behavior: hide vs destroy
 │   ├── tray.ts             # System tray icon + i18n context menu
-│   ├── preload.ts          # contextBridge IPC whitelist (42 methods + 4 listeners)
-│   ├── live2d-window.ts    # Live2D transparent BrowserWindow lifecycle + model management
-│   ├── live2d-preload.ts   # Live2D window contextBridge (voice, chat, model IPC)
-│   ├── speech-engine.ts    # sherpa-onnx ASR (streaming paraformer) + VAD + TTS subprocess
-│   ├── tts-worker.js       # Standalone Node.js script for TTS (avoids Electron external buffer restriction)
-│   ├── preload.ts          # contextBridge IPC whitelist (~66 methods + 5 listeners)
+│   ├── preload.ts          # contextBridge IPC whitelist (~75 methods + 5 listeners)
 │   ├── provider-config.ts  # Provider presets, verification, config R/W
 │   ├── setup-manager.ts    # Setup wizard window lifecycle
 │   ├── setup-ipc.ts        # Setup validation + config write + CLI install
@@ -68,10 +67,9 @@ oneclaw/
 │   ├── build-config.ts     # Build-time injected config reader (PostHog, registry URL)
 │   ├── cli-integration.ts  # CLI wrapper generation, PATH injection (POSIX + Windows)
 │   ├── launch-at-login.ts  # macOS/Windows launch at login toggle
-│   ├── channel-pairing-monitor.ts  # Unified multi-channel pairing polling + state
-│   ├── channel-pairing-store.ts    # Per-channel pairing approval persistence
-│   ├── feishu-pairing-monitor.ts   # Feishu-specific pairing monitor
+│   ├── channel-pairing-store.ts    # Per-channel approved-user sidecar (allowFrom storage)
 │   ├── wecom-config.ts     # WeCom (企业微信) plugin config
+│   ├── weixin-config.ts    # WeChat (微信) plugin config
 │   ├── dingtalk-config.ts  # DingTalk connector plugin config
 │   ├── qqbot-config.ts     # QQ Bot plugin config
 │   ├── update-banner-state.ts     # Update banner pure state machine
@@ -79,17 +77,8 @@ oneclaw/
 │   ├── analytics-events.ts # Event classification + property sanitization
 │   ├── auto-updater.ts     # electron-updater wrapper + progress callback
 │   └── logger.ts           # Dual-write logger (file + console)
-├── chat-ui/                # Lit-based Chat UI SPA (file:// loaded)
-│   └── ui/                 # Vite project: Lit 3 components, sidebar, settings view
-├── live2d/                 # Live2D desktop pet frontend (vanilla HTML/CSS/JS)
-│   ├── index.html          # Live2D transparent window layout (model canvas + chat bubble + mic button)
-│   ├── live2d.css          # Transparent window styling, chat bubble, mic button
-│   ├── voice-chat.js       # Voice chat controller (ASR events, TTS playback, lip sync, keyboard shortcut)
-│   └── chat-bubble.js      # Chat bubble UI component (user/AI text display)
-├── resources/models/speech/ # Speech models (sherpa-onnx, gitignored)
-│   ├── silero_vad.onnx                                    # Silero VAD model
-│   ├── sherpa-onnx-streaming-paraformer-bilingual-zh-en/  # Streaming ASR model (encoder + decoder + tokens)
-│   └── vits-zh-hf-theresa/                                # VITS TTS model (theresa.onnx + tokens + lexicon)
+├── chat-ui/                # Lit-based Chat UI SPA (file:// loaded, ~35K LOC)
+│   └── ui/                 # Vite project: Lit 3 components, sidebar, settings view, model selector
 ├── setup/                  # Setup wizard frontend (vanilla HTML/CSS/JS)
 │   ├── index.html          # Multi-step wizard with data-i18n attributes
 │   ├── setup.css           # Dark/light theme via prefers-color-scheme
@@ -101,6 +90,10 @@ oneclaw/
 │   ├── settings.js         # Provider CRUD, multi-channel, Kimi, CLI, backup/restore
 │   ├── lucide-sprite.generated.js  # Icon sprites
 │   └── share-copy-content.json     # Fallback share copy content
+├── builtin-skills/         # OneClaw-owned skills, bundled into app and copied to ~/.openclaw/workspace/skills/ on first launch
+│   ├── officecli-docx/     # DOCX read/write skill backed by bundled OfficeCLI binary
+│   ├── officecli-pptx/     # PPTX read/write skill backed by bundled OfficeCLI binary
+│   └── officecli-xlsx/     # XLSX read/write skill backed by bundled OfficeCLI binary
 ├── scripts/
 │   ├── package-resources.js    # Downloads Node.js 22 + installs openclaw from npm
 │   ├── afterPack.js            # electron-builder hook: injects resources post-strip
@@ -125,7 +118,9 @@ oneclaw/
 ```
 resources/targets/<platform-arch>/   # Per-target Node.js + gateway deps
   ├── runtime/node[.exe]             # Node.js 22 binary
-  ├── gateway/                       # openclaw production node_modules
+  ├── gateway/                       # openclaw production node_modules (散文件)
+  ├── gateway.asar                   # Gateway ASAR archive (CI 构建产物)
+  ├── gateway.asar.unpacked/         # ASAR unpacked files (native modules, extensions)
   └── .node-stamp                    # Incremental build marker
 chat-ui/dist/                        # Vite output (Lit Chat UI SPA)
 dist/                                # tsc output
@@ -138,7 +133,8 @@ out/                                 # electron-builder output (DMG/NSIS)
 ```bash
 npm run build                # Vite (chat-ui) + TypeScript → dist/
 npm run build:chat           # Build Chat UI only (Lit + Vite)
-npm run dev                  # Run in dev mode (electron .)
+npm run dev                  # Run in dev mode (electron .) — does NOT rebuild, see gotcha #31
+npm run dev:isolated         # Run a second dev instance with its own port + state dir (multi-worktree)
 npm run package:resources    # Download Node.js 22 + install openclaw from npm
 npm run dist:mac:arm64       # Full pipeline: package → DMG + ZIP (arm64)
 npm run dist:mac:x64         # Same for x64
@@ -148,12 +144,48 @@ npm run dist:all:parallel    # Build all 4 targets in parallel
 npm run clean                # Remove all generated files
 ```
 
+**Isolated local startup using production config** (skip Setup):
+
+```bash
+# First run, or refresh from production config:
+rm -f .dev-state/dev.pid .dev-state/oneclaw.config.json .dev-state/openclaw.json .dev-state/openclaw.json.bak .dev-state/logs/config-health.json
+npm run dev:isolated
+
+# Cleanup after the test run:
+rm -rf .dev-state && npm run clean && rm -rf chat-ui/dist tsconfig.tsbuildinfo
+```
+
+- `dev:isolated` runs with `ONECLAW_MULTI_INSTANCE=1`, `OPENCLAW_STATE_DIR=.dev-state`, and a deterministic gateway port in `19000-19999`.
+- On a fresh `.dev-state`, it copies `~/.openclaw/oneclaw.config.json`, `~/.openclaw/openclaw.json`, and credentials, then rewrites `agents.defaults.workspace` to `.dev-state/workspace` so tests do not write into the production workspace.
+- Setup is skipped when `.dev-state/oneclaw.config.json` contains `setupCompletedAt`; use `npm run dev:isolated -- --with-setup` only when testing the Setup Wizard.
+
 **Full build pipeline** (what `dist:mac:arm64` does):
 
-1. `package:resources` — download Node.js 22, `npm install openclaw --production --install-links` (version auto-fetched from npm)
+1. `package:resources` — download Node.js 22, `npm install openclaw@<pinned> --production --install-links` plus per-channel plugins, optionally create `gateway.asar` (set `ONECLAW_GATEWAY_ASAR=1`)
 2. `build:chat` — Vite builds Lit Chat UI into `chat-ui/dist/`
 3. `tsc` — compile TypeScript
 4. `electron-builder` → `afterPack.js` injects `resources/targets/<target>/` into app bundle → DMG/ZIP/NSIS
+
+### Dev Loop (important)
+
+`npm run dev` only runs `electron .` against whatever is already in `dist/` and `chat-ui/dist/` — it does **not** rebuild. After editing sources, rebuild manually before restarting Electron, or stale bundles will silently swallow your changes:
+
+```bash
+npx tsc                 # after editing src/*.ts
+npm run build:chat      # after editing chat-ui/ui/** (Lit components)
+npm run build           # both at once
+```
+
+### Tests
+
+Tests use the built-in `node:test` runner (TypeScript, `.test.ts` files in `src/`). There is no `npm test` script. Excluded from the production `tsc` build (see `tsconfig.json`). Run a single test file with a TS-aware node, e.g.:
+
+```bash
+npx tsx --test src/analytics-events.test.ts
+```
+
+There is no linter configured; `tsc --noEmit` is the de facto type check.
+
 
 ## Key Design Decisions
 
@@ -426,10 +458,12 @@ Electron 40 defaults to sandbox mode. 42 IPC methods + 4 event listeners are exp
 - **Kimi OAuth** — Device code flow via `auth.kimi.com`, 60s refresh interval, 300s refresh threshold.
 - **Setup wizard** — Step 0 (conflict detection) → Step 1 (welcome) → Step 2 (provider) → Step 3 (done + CLI + login toggle).
 - **Settings** — 7 tabs: Provider, Search, Channels, KimiClaw, Appearance, Advanced, Backup.
-- **Multi-channel integration** — Unified pairing monitor aggregates Feishu, WeCom, DingTalk, QQ Bot with per-channel state tracking and auto-approval.
+- **Multi-channel integration** — Feishu / WeCom / DingTalk / QQ Bot / WeChat share a common plugin-enable + channel-config schema. New installs default `dmPolicy: "open"` (with `allowFrom: ["*"]`). Users can opt into `dmPolicy: "pairing"` per channel; approved-user list is maintained via an allowFrom sidecar (no background polling).
 - **Skill store** — clawhub CLI integration, skills at `~/.openclaw/workspace/skills/`, registry config in `~/.openclaw/skill-store.json`.
 - **Config backup** — Rolling 10 backups + last-known-good snapshot + factory reset.
-- **Preload security** — ~66 IPC methods + 5 event listeners via `contextBridge` (sandbox mode).
+- **Multi-model management** — IPC handlers for listing, deleting, setting default, and aliasing models across providers.
+- **Gateway ASAR packaging** — Optional `gateway.asar` archive (enabled by `ONECLAW_GATEWAY_ASAR=1`) reduces 5000+ files to a single archive for faster Windows installs. Patched openclaw boundary check for ASAR paths. Extensions unpacked to `gateway.asar.unpacked/`.
+- **Preload security** — ~75 IPC methods + 5 event listeners via `contextBridge` (sandbox mode).
 
 ## Runtime Paths (on user's machine)
 
@@ -470,113 +504,6 @@ For comprehensive design guidelines, please refer to:
 
 ## Common Gotchas
 
-1. **`npm install file:` creates symlinks, not copies.** Always use `--install-links` for physical copy. This is critical for electron-builder packaging.
+See [docs/gotchas.md](docs/gotchas.md) for the full list (29 items covering packaging, signing, config, tooltip, design tokens, etc.).
 
-2. **Cross-platform build needs re-packaging.** After switching target platform, `npm run package:resources` must run again because the Node.js binary and native modules differ per platform.
-
-3. **All Kimi sub-platforms use unified config.** All three (moonshot-cn, moonshot-ai, kimi-code) write `apiKey` + `baseUrl` + `api` + `models` to `models.providers`. No special-casing.
-
-4. **Health check timeout is 90 seconds.** This is intentionally long for Windows. Don't reduce it without testing on slow machines.
-
-5. **Tray app behavior.** Closing the window hides it; the app stays in the tray. `Cmd+Q` (or Quit from tray menu) actually quits. macOS Dock icon hides automatically when no windows are visible.
-
-6. **macOS signing.** By default uses ad-hoc identity (`-`). Set `ONECLAW_MAC_SIGN_AND_NOTARIZE=true` + `CSC_NAME`, `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` in `.env` for real signing.
-
-7. **Version is auto-derived from git tag.** Format: `YYYY.MMDD.N` (e.g. `v2026.318.0`). `package.json` stays `0.0.0-dev`; CI extracts version from tag via `npm version`. Never manually edit `package.json` version.
-
-8. **No local upstream directory needed.** openclaw is installed from npm directly during `package:resources`. The `upstream/` directory is no longer required.
-
-9. **Blockmap generation is disabled.** Both DMG and NSIS have blockmap/differential disabled to avoid unnecessary `.blockmap` files.
-
-10. **macOS auto-update requires ZIP.** electron-updater needs the ZIP artifact, not DMG. Both are built: DMG for manual distribution, ZIP for auto-update.
-
-11. **`OPENCLAW_NO_RESPAWN=1` is required.** All child processes (gateway, doctor, CLI) must set this env var to prevent subprocess self-respawning, which causes console window flickering on Windows.
-
-12. **Gateway entry fallback.** `resolveGatewayEntry()` tries `openclaw.mjs` first (new packages), then falls back to `gateway-entry.mjs` (legacy). Both paths must be considered during packaging verification.
-
-13. **CLI wrapper uses RC block markers.** Install/uninstall is idempotent via `# >>> oneclaw-cli >>>` / `# <<< oneclaw-cli <<<` markers in shell profiles. Always check for marker presence before modifying.
-
-14. **Kimi Search API key is a sidecar file**, not in `openclaw.json`. Stored at `~/.openclaw/credentials/kimi-search-api-key`. Auto-reuses kimi-code provider key if no dedicated key exists.
-
-15. **AGENTS.md is a symlink to CLAUDE.md.** Don't create separate content — they share the same file.
-
-16. **Gateway port is configurable.** Resolution order: env `OPENCLAW_GATEWAY_PORT` > config `gateway.port` in `openclaw.json` > default `18789`. Don't hardcode port numbers — use `resolveGatewayPort()` from `constants.ts`.
-
-17. **Gateway npm update check is disabled.** OneClaw writes `update.checkOnStart = false` to the gateway config at startup. The gateway cannot self-update inside a packaged Electron app.
-
-18. **`oneclaw.config.json` is the ownership marker.** OneClaw uses this file to detect config ownership at startup. Detection flow: `oneclaw.config.json` exists → normal startup; `.device-id` exists → legacy migration; `openclaw.json` exists without marker → external OpenClaw takeover; nothing → fresh Setup. Do not delete this file manually.
-
-19. **TTS must run in a child process, not in Electron.** Electron 40's V8 forbids N-API external ArrayBuffers. sherpa-onnx's `OfflineTts.generate()` returns `Float32Array` backed by native external memory, which causes `External buffers are not allowed` errors in Electron. The TTS worker (`tts-worker.js`) runs in a separate system `node` process to avoid this restriction.
-
-20. **TTS audio served via custom protocol.** Renderers can't access `file://` paths from temp directories due to security restrictions. The `oneclaw-tts://` custom protocol registered via `protocol.handle()` serves WAV files from `$TMPDIR/oneclaw-tts/` to the Live2D renderer.
-
-21. **`tts-worker.js` must be copied to `dist/` during build.** It's a plain `.js` file (not TypeScript), so `tsc` won't process it. The build script includes `cp src/tts-worker.js dist/tts-worker.js`.
-
-22. **Speech models are not bundled in the repo.** Models in `resources/models/speech/` are gitignored and must be downloaded separately. ASR requires `encoder.int8.onnx`, `decoder.int8.onnx`, `tokens.txt`; TTS requires `theresa.onnx`, `tokens.txt`, `lexicon.txt`.
-
-23. **`DYLD_LIBRARY_PATH` must be set before Electron starts (dev mode).** sherpa-onnx native addon depends on co-located `.dylib` files. macOS's DYLD_LIBRARY_PATH cannot be set after process start. The `dev` script sets it: `DYLD_LIBRARY_PATH=$PWD/node_modules/sherpa-onnx-darwin-x64:$DYLD_LIBRARY_PATH electron .`
-
-## Architecture Diagram
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                   Electron Main Process                       │
-│                                                              │
-│  main.ts ─── gateway-process.ts ─── constants.ts             │
-│     │              │                     │                   │
-│     │         spawn child ──────── path resolution           │
-│     │              │                                         │
-│     ├── window.ts (BrowserWindow + token inject + chat inject)│
-│     │     └── window-close-policy.ts (hide vs destroy)       │
-│     ├── live2d-window.ts (transparent Live2D BrowserWindow)  │
-│     │     └── live2d-preload.ts (voice/chat/model IPC)       │
-│     ├── speech-engine.ts (ASR + VAD + TTS subprocess mgmt)  │
-│     │     └── tts-worker.js (child process: sherpa-onnx TTS) │
-│     ├── tray.ts   (system tray + i18n menu)                  │
-│     ├── provider-config.ts (presets + verify + config)       │
-│     ├── config-backup.ts (rolling backups + recovery)        │
-│     ├── setup-manager.ts + setup-ipc.ts (wizard + CLI)       │
-│     │     └── setup-completion.ts (completion detection)     │
-│     ├── settings-ipc.ts + settings/ (embedded settings)      │
-│     ├── share-copy.ts (CDN content + fallback)               │
-│     ├── kimi-config.ts (Kimi plugin + Kimi Search)           │
-│     ├── cli-integration.ts (CLI wrapper + PATH injection)    │
-│     ├── launch-at-login.ts (system startup toggle)           │
-│     ├── feishu-pairing-monitor.ts (pairing request polling)  │
-│     ├── update-banner-state.ts (update UI state machine)     │
-│     ├── gateway-rpc.ts (WebSocket RPC to gateway)            │
-│     ├── analytics.ts + analytics-events.ts (telemetry)       │
-│     ├── auto-updater.ts (CDN updates + progress)             │
-│     ├── gateway-auth.ts (token management)                   │
-│     └── logger.ts (file + console)                           │
-│                                                              │
-│  preload.ts ─── contextBridge (42 IPC + 4 listeners)         │
-│  protocol: oneclaw-tts:// (serves TTS WAV from temp dir)     │
-└──────────────────┬───────────────┬───────────────────────────┘
-                   │               │
-     ┌─────────────┴──────┐  ┌────┴──────────────────────┐
-     │  Gateway Child Proc │  │  Live2D BrowserWindow     │
-     │  Node.js 22+openclaw│  │  transparent overlay      │
-     │  :configurable port │  │  pixi-live2d-display      │
-     └─────────────┬───────┘  │  voice-chat.js (C key PTT)│
-                   │          │  chat-bubble.js           │
-                   │ WS+HTTP  └────┬──────────────────────┘
-     ┌─────────────┴──────┐       │ IPC (ASR/TTS/chat)
-     │    BrowserWindow   │       │
-     │  Lit Chat UI from  │◄──────┘ injectChatMessage()
-     │  file:// (chat-ui/)│
-     └────────────────────┘
-
-Voice Pipeline:
-  [Mic] → naudiodon2 → SpeechEngine(ASR) → final text
-    → injectChatMessage(text) → Chat UI → AI reply
-    → cleanTextForTts() → tts-worker.js(child proc) → WAV file
-    → oneclaw-tts:// protocol → Audio element → AnalyserNode → lip sync
-```
-19. **Skill store config is standalone.** Registry URL stored in `~/.openclaw/skill-store.json`, not in gateway config. Skills installed to `~/.openclaw/workspace/skills/`, not `~/.openclaw/skills/`.
-
-20. **CLI wrapper invokes bundled Node.js.** The wrapper scripts use the real bundled Node.js binary from the app package, not the system node.
-
-21. **Token injection uses URL fragment.** Gateway auth token is passed via `#token=...` in the loaded URL, not query parameter or localStorage.
-
-22. **Build config replaces analytics config.** `build-config.json` (renamed from `analytics-config.json`) is injected at build time and read by `build-config.ts`. Contains PostHog key, clawhub registry, and other build constants.
+When you encounter a non-trivial problem and find a working solution, add it to `docs/gotchas.md` so future developers don't repeat the same investigation.

@@ -5,12 +5,11 @@
   "description": "OneClaw desktop app — cross-platform Electron shell for openclaw",
   "main": "dist/main.js",
   "scripts": {
-    "generate:settings-icons": "node scripts/generate-settings-icons.js",
     "build:chat": "cd chat-ui/ui && npm install --prefer-offline && npx vite build",
-    "build": "npm run generate:settings-icons && npm run build:chat && tsc -p tsconfig.json && cp src/tts-worker.js dist/tts-worker.js",
-    "download:speech-models": "bash scripts/download-speech-models.sh",
-    "predev": "npm run build",
-    "dev": "DYLD_LIBRARY_PATH=$PWD/node_modules/sherpa-onnx-darwin-$(node -p \"process.arch\"):$DYLD_LIBRARY_PATH electron .",
+    "build": "npm run build:chat && tsc -p tsconfig.json",
+    "predev": "npm install && npm run package:resources && npm run build",
+    "dev": "electron .",
+    "dev:isolated": "node scripts/dev-isolated.js",
     "package:resources": "node scripts/run-with-env.js node scripts/package-resources.js",
     "dist:mac": "npm run dist:mac:arm64",
     "dist:mac:arm64": "npm run build && npm run download:speech-models && ONECLAW_TARGET=darwin-arm64 npm run package:resources -- --platform darwin --arch arm64 && ONECLAW_TARGET=darwin-arm64 node scripts/run-with-env.js node scripts/run-mac-builder.js --arch arm64 --output out/darwin-arm64",
@@ -40,6 +39,7 @@
     "@types/node": "^22.15.0",
     "electron": "^40.2.1",
     "electron-builder": "^26.7.0",
+    "esbuild": "^0.25.12",
     "isbinaryfile": "^5.0.0",
     "lucide": "^0.577.0",
     "typescript": "^5.9.3"
@@ -49,5 +49,13 @@
   },
   "overrides": {
     "isbinaryfile": "$isbinaryfile"
+  },
+  "oneclaw": {
+    "openclaw": "2026.4.5",
+    "dingtalkConnector": "0.8.17",
+    "weixin": "2.4.3",
+    "wecom": "2026.4.8",
+    "qqbot": "1.6.1",
+    "officecli": "1.0.47"
   }
 }

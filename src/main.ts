@@ -1,27 +1,15 @@
-import { app, dialog, ipcMain, shell, Menu, BrowserWindow, protocol, net } from "electron";
-import * as path from "path";
 import * as fs from "fs";
+import * as path from "path";
+import { app, clipboard, dialog, ipcMain, shell, Menu, BrowserWindow } from "electron";
 import { GatewayProcess } from "./gateway-process";
 import { WindowManager } from "./window";
 import { TrayManager } from "./tray";
-import { SetupManager } from "./setup-manager";
-import { Live2DWindowManager, getModelList } from "./live2d-window";
-import { SpeechEngine, checkSpeechModels } from "./speech-engine";
+// SetupManager removed: Setup is now a Lit view inside the main window
 import { registerSetupIpc } from "./setup-ipc";
-import {
-  approveFeishuPairingRequest,
-  approveWecomPairingRequest,
-  closeFeishuFirstPairingWindow,
-  consumeFeishuFirstPairingWindow,
-  getFeishuPairingModeState,
-  getWecomPairingModeState,
-  isFeishuFirstPairingWindowActive,
-  listFeishuPairingRequests,
-  listWecomPairingRequests,
-  registerSettingsIpc,
-} from "./settings-ipc";
+import { registerSettingsIpc } from "./settings-ipc";
 import { registerSkillStoreIpc } from "./skill-store";
-import { ChannelPairingMonitor } from "./channel-pairing-monitor";
+import { registerWorkspaceIpc } from "./workspace-ipc";
+import { registerFeedbackIpc, stopFeedbackSse } from "./feedback-ipc";
 import {
   setupAutoUpdater,
   checkForUpdates,
@@ -39,14 +27,18 @@ import {
   getConfigRecoveryData,
   inspectUserConfigHealth,
   recordLastKnownGoodConfigSnapshot,
-  recordSetupBaselineConfigSnapshot,
   restoreLastKnownGoodConfigSnapshot,
 } from "./config-backup";
 import { readUserConfig, writeUserConfig } from "./provider-config";
-import { resolveKimiSearchApiKey } from "./kimi-config";
+import { resolveKimiSearchApiKey, readKimiApiKey, readKimiSearchDedicatedApiKey, writeKimiApiKey, ensureMemorySearchProxyConfig, ensureKimiPluginDeviceId } from "./kimi-config";
 import { reconcileCliOnAppLaunch } from "./cli-integration";
-import { detectOwnership, migrateFromLegacy, markSetupComplete } from "./oneclaw-config";
+import { reconcileExtensionsOnAppLaunch } from "./extension-mirror";
+import { migrateLegacyFeishuPluginEntry } from "./feishu-config";
+import { migrateBrowserProfileForCurrentGateway } from "./browser-profile-config";
+import { uninstallGatewayDaemon, killPortProcess, getPortPid } from "./install-detector";
+import { detectOwnership, migrateFromLegacy, readOneclawConfig, writeOneclawConfig, appendChannelUtm } from "./oneclaw-config";
 import { startTokenRefresh, stopTokenRefresh, loadOAuthToken } from "./kimi-oauth";
+import { startAuthProxy, stopAuthProxy, setProxyAccessToken, setProxySearchDedicatedKey, getProxyPort } from "./kimi-auth-proxy";
 import * as log from "./logger";
 import * as analytics from "./analytics";
 
@@ -101,9 +93,9 @@ function attachRendererDebugHandlers(label: string, webContents: Electron.WebCon
   });
 }
 
-// ── 单实例锁 ──
+// ── 单实例锁（ONECLAW_MULTI_INSTANCE=1 时跳过，允许多 worktree 并行 dev） ──
 
-if (!app.requestSingleInstanceLock()) {
+if (!process.env.ONECLAW_MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }
@@ -111,6 +103,7 @@ if (!app.requestSingleInstanceLock()) {
 // ── 全局错误兜底 ──
 
 process.on("uncaughtException", (err) => {
+  if ((err as NodeJS.ErrnoException).code === "EPIPE") return;
   log.error(`uncaughtException: ${err.stack || err.message}`);
 });
 process.on("unhandledRejection", (reason) => {
@@ -119,72 +112,35 @@ process.on("unhandledRejection", (reason) => {
 
 // ── 核心组件 ──
 
-let pairingMonitor: ChannelPairingMonitor | null = null;
+const appStartTime = Date.now();
 const gateway = new GatewayProcess({
   port: resolveGatewayPort(),
   token: resolveGatewayAuthToken({ persist: false }),
-  onStateChange: () => {
+  onStateChange: (state) => {
     tray.updateMenu();
-    pairingMonitor?.triggerNow();
+    // gateway 就绪后立即通知 Chat UI 重连，避免盲等指数退避
+    if (state === "running") {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send("gateway:ready");
+      }
+    }
   },
 });
 const windowManager = new WindowManager();
 const tray = new TrayManager();
-const setupManager = new SetupManager();
-const live2dManager = new Live2DWindowManager();
-const speechEngine = new SpeechEngine();
-
-// Live2D 独立显示，不与主窗口互斥联动
-
-// 应用前台判定：任一窗口拿到系统焦点即视为前台；否则视为后台。
-function isAppInForeground(): boolean {
-  return BrowserWindow.getAllWindows().some(
-    (w) => !w.isDestroyed() && w.isFocused(),
-  );
-}
-
-pairingMonitor = new ChannelPairingMonitor({
-  gateway,
-  isAppInForeground,
-  adapters: [
-    {
-      channel: "feishu",
-      getModeState: () => getFeishuPairingModeState(),
-      listRequests: () => listFeishuPairingRequests(),
-      approveRequest: (params) => approveFeishuPairingRequest(params),
-      autoApproveFirst: {
-        isActive: () => isFeishuFirstPairingWindowActive(),
-        consume: (userId) => consumeFeishuFirstPairingWindow(userId),
-        reset: () => closeFeishuFirstPairingWindow(),
-      },
-      onInactive: () => closeFeishuFirstPairingWindow(),
-    },
-    {
-      channel: "wecom",
-      getModeState: () => getWecomPairingModeState(),
-      listRequests: () => listWecomPairingRequests(),
-      approveRequest: (params) => approveWecomPairingRequest(params),
-    },
-  ],
-  onStateChange: (state) => {
-    windowManager.pushPairingState(state);
-  },
-});
+// Setup view state tracked via windowManager.inSetupView (set by IPC from renderer)
 
 // ── 显示主窗口的统一入口 ──
 
-function showMainWindow(): Promise<void> {
+function showMainWindow(initialView?: "setup" | "chat"): Promise<void> {
   return windowManager.show({
     port: gateway.getPort(),
     token: gateway.getToken(),
+    initialView,
   });
 }
 
 function openSettingsInMainWindow(): Promise<void> {
-  if (setupManager.isSetupOpen()) {
-    setupManager.focusSetup();
-    return Promise.resolve();
-  }
   return windowManager.openSettings({
     port: gateway.getPort(),
     token: gateway.getToken(),
@@ -192,7 +148,15 @@ function openSettingsInMainWindow(): Promise<void> {
 }
 
 function openRecoverySettings(notice: string): void {
-  openSettingsInMainWindow().catch((err) => {
+  // Navigate to settings with tab+notice in the payload so they arrive
+  // through reactive state (settingsTabHint / settingsNotice) — no race
+  // with the settings-view listener registration.
+  windowManager.show({
+    port: gateway.getPort(),
+    token: gateway.getToken(),
+  }).then(() => {
+    windowManager.navigate({ view: "settings", settingsTab: "backup", settingsNotice: notice });
+  }).catch((err) => {
     log.error(`恢复流程打开设置失败(${notice}): ${err}`);
   });
 }
@@ -312,13 +276,66 @@ function migrateDisableGatewayUpdateCheck(): void {
   }
 }
 
+// 存量用户迁移：给 kimi-claw.config.bridge 补齐 deviceId。
+// 老配置下该字段缺失时 kimi-claw 上报 device_id="unknown-device"，会被 Kimi 后端
+// 按匿名桶严限流（GetMessages 429 resource_exhausted → 发消息无响应）。
+function migrateKimiPluginDeviceId(): void {
+  try {
+    const config = readUserConfig();
+    if (!ensureKimiPluginDeviceId(config)) return;
+    writeUserConfig(config);
+    log.info("[migrate] 已为 kimi-claw.config.bridge 补齐 deviceId");
+  } catch {
+    // 迁移失败不阻塞启动
+  }
+}
+
+// 存量用户迁移：openclaw 2026.4.x 的 dingtalk-connector 新 schema 设置 additionalProperties: false，
+// 拒绝旧版本遗留的 gatewayToken / sessionTimeout 字段，会导致 gateway 启动时配置校验失败。
+// 幂等删除这两个字段；失败不阻塞启动。
+function migrateDeprecatedDingtalkFields(): void {
+  try {
+    const config = readUserConfig();
+    const channels = config.channels as Record<string, unknown> | undefined;
+    const dingtalk = channels?.["dingtalk-connector"];
+    if (!dingtalk || typeof dingtalk !== "object") return;
+    const record = dingtalk as Record<string, unknown>;
+    const deprecated = ["gatewayToken", "sessionTimeout"] as const;
+    const removed = deprecated.filter((k) => k in record);
+    if (removed.length === 0) return;
+    for (const k of removed) delete record[k];
+    writeUserConfig(config);
+    log.info(`[migrate] 已移除 dingtalk-connector 的 deprecated 字段: ${removed.join(", ")}`);
+  } catch {
+    // 迁移失败不阻塞启动
+  }
+}
+
+// 存量用户迁移：openclaw 2026.4.x 移除了旧 Chrome extension relay profile。
+// 旧版 Settings 写入 chrome/chrome-relay 会让 browser control 根路径返回 ProfileNotFound。
+function migrateBrowserProfileConfig(): void {
+  try {
+    const config = readUserConfig();
+    if (!migrateBrowserProfileForCurrentGateway(config)) return;
+    writeUserConfig(config);
+    log.info("[migrate] 已将旧 Chrome relay 浏览器配置迁移到 user profile");
+  } catch {
+    // 迁移失败不阻塞启动
+  }
+}
+
 // 从配置同步 search API key 到 gateway 环境变量
+// 代理模式下实际请求走代理注入 token，但插件初始化仍需 env var 存在
 function syncKimiSearchEnv(): void {
   try {
     const config = readUserConfig();
     const key = resolveKimiSearchApiKey(config);
     if (key) {
       gateway.setExtraEnv({ KIMI_PLUGIN_API_KEY: key });
+    } else if (getProxyPort() > 0) {
+      // 代理模式：插件初始化需要 env var 存在，设占位符让插件通过检查
+      // 实际请求走 proxy baseUrl，由代理注入真实 token
+      gateway.setExtraEnv({ KIMI_PLUGIN_API_KEY: "proxy-managed" });
     }
   } catch {
     // 配置读取失败不阻塞启动
@@ -327,6 +344,7 @@ function syncKimiSearchEnv(): void {
 
 // 启动 Gateway（最多尝试 3 次，覆盖 Windows 冷启动慢导致的前两次超时）
 async function ensureGatewayRunning(source: string): Promise<boolean> {
+  migrateLegacyFeishuConfigForGatewayStart();
   // 启动前从配置同步 token，避免 Setup 后仍使用旧内存 token。
   gateway.setToken(resolveGatewayAuthToken());
   syncKimiSearchEnv();
@@ -350,10 +368,24 @@ async function ensureGatewayRunning(source: string): Promise<boolean> {
   return false;
 }
 
+function migrateLegacyFeishuConfigForGatewayStart(): void {
+  try {
+    const config = readUserConfig();
+    if (!migrateLegacyFeishuPluginEntry(config)) {
+      return;
+    }
+    writeUserConfig(config);
+    log.info("[startup] migrated legacy Feishu plugin entry to channels.feishu.enabled");
+  } catch (err: any) {
+    log.warn(`[startup] failed to migrate legacy Feishu config: ${err?.message ?? err}`);
+  }
+}
+
 // 外部 OpenClaw 接管：进 Setup 向导，Step 0 展示冲突并让用户决定
+// 注意：不在此处预清理 daemon/进程，实际卸载动作在 setup:resolve-conflict 中由用户显式触发
 async function handleExternalOpenclawTakeover(): Promise<void> {
-  log.info("[startup] external OpenClaw detected, launching setup with conflict check");
-  setupManager.showSetup();
+  log.info("[startup] external OpenClaw detected, showing setup for user decision");
+  await showMainWindow("setup");
 }
 
 async function startGatewayAndShowMain(source: string, opts: StartMainOptions = {}): Promise<boolean> {
@@ -361,6 +393,18 @@ async function startGatewayAndShowMain(source: string, opts: StartMainOptions = 
   const reportFailure = opts.reportFailure ?? true;
 
   log.info(`启动链路开始: ${source}`);
+  await ensureAuthProxy();
+
+  // OAuth token 后台刷新（仅 OAuth 用户需要）
+  if (loadOAuthToken()) {
+    ensureOAuthTokenRefresh();
+  }
+
+  // 把内置 channel plugin 从 mirror reconcile 到 ~/.openclaw/extensions/。
+  // 必须在 gateway 启动前 await——openclaw 首次扫描 plugin root 时要看到完整目录。
+  // 函数自身吞掉所有错误，不会阻断启动。
+  await reconcileExtensionsOnAppLaunch();
+
   const running = await ensureGatewayRunning(source);
   if (!running) {
     if (reportFailure) {
@@ -386,11 +430,6 @@ async function startGatewayAndShowMain(source: string, opts: StartMainOptions = 
     }
     if (!openOnFailure) return false;
   }
-  // OAuth token 后台刷新：gateway 启动后检查是否有 kimi-coding OAuth token
-  if (running && loadOAuthToken()) {
-    ensureOAuthTokenRefresh();
-  }
-
   await showMainWindow();
   return running;
 }
@@ -404,36 +443,116 @@ function requestGatewayStart(source: string): void {
   });
 }
 
+// 重启 debounce：多次快速调用只执行最后一次，避免连环重启
+let restartTimer: ReturnType<typeof setTimeout> | null = null;
 function requestGatewayRestart(source: string): void {
-  gateway.setToken(resolveGatewayAuthToken());
-  syncKimiSearchEnv();
-  gateway.restart().catch((err) => {
-    log.error(`Gateway 重启失败(${source}): ${err}`);
-  });
+  if (restartTimer) clearTimeout(restartTimer);
+  log.info(`[gateway] restart requested: ${source}`);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    log.info(`[gateway] restart executing: ${source}`);
+    gateway.setToken(resolveGatewayAuthToken());
+    syncKimiSearchEnv();
+    gateway.restart().catch((err) => {
+      log.error(`Gateway 重启失败(${source}): ${err}`);
+    });
+  }, 800);
+}
+
+// 解析当前最优 token：OAuth > 手动 key
+function resolveCurrentToken(): string {
+  const oauthToken = loadOAuthToken();
+  if (oauthToken?.access_token) return oauthToken.access_token;
+  return readKimiApiKey();
+}
+
+// 从 config baseUrl 解析历史代理端口（避免不必要的 config 写入）
+function parseProxyPortFromConfig(): number {
+  try {
+    const config = readUserConfig();
+    const baseUrl = config?.models?.providers?.["kimi-coding"]?.baseUrl;
+    if (typeof baseUrl === "string" && baseUrl.includes("127.0.0.1")) {
+      const m = baseUrl.match(/:(\d+)\//);
+      if (m) return Number.parseInt(m[1], 10);
+    }
+  } catch {}
+  return 0;
+}
+
+// 确保 config 中 kimi-coding 指向代理（仅端口变化时写入）
+function ensureProxyConfig(proxyPort: number): void {
+  try {
+    const config = readUserConfig();
+    const provider = config?.models?.providers?.["kimi-coding"];
+    if (!provider) return;
+
+    const expectedBase = `http://127.0.0.1:${proxyPort}/coding`;
+    // memorySearch embedding 也走同一个代理
+    const memorySearchChanged = ensureMemorySearchProxyConfig(config, proxyPort);
+
+    if (provider.baseUrl === expectedBase && provider.apiKey === "proxy-managed" && !memorySearchChanged) return;
+
+    // 首次迁移：真实 apiKey 存入 sidecar（非 OAuth 用户 + 有效 key）
+    if (provider.apiKey && provider.apiKey !== "proxy-managed" && !loadOAuthToken()) {
+      writeKimiApiKey(provider.apiKey);
+    }
+
+    provider.baseUrl = expectedBase;
+    provider.apiKey = "proxy-managed";
+
+    // 同步 kimi-search 插件端点到代理（默认端点在 /coding/v1/ 路径下）
+    const searchEntry = config?.plugins?.entries?.["kimi-search"];
+    if (searchEntry && typeof searchEntry === "object") {
+      searchEntry.config ??= {};
+      searchEntry.config.search = { baseUrl: `http://127.0.0.1:${proxyPort}/coding/v1/search` };
+      searchEntry.config.fetch = { baseUrl: `http://127.0.0.1:${proxyPort}/coding/v1/fetch` };
+    }
+
+    writeUserConfig(config);
+    log.info(`[auth-proxy] config updated: baseUrl → 127.0.0.1:${proxyPort}`);
+  } catch (err: any) {
+    log.error(`[auth-proxy] ensureProxyConfig failed: ${err.message}`);
+  }
+}
+
+// 启动 Auth Proxy 并同步 config（gateway 启动前调用）
+async function ensureAuthProxy(): Promise<void> {
+  try {
+    const config = readUserConfig();
+    // 只有配置了 kimi-coding provider 才启动代理
+    if (!config?.models?.providers?.["kimi-coding"]) return;
+
+    // 设置 token
+    const token = resolveCurrentToken();
+    setProxyAccessToken(token);
+
+    // 设置 Kimi Search 专属 key
+    const searchKey = readKimiSearchDedicatedApiKey();
+    if (searchKey) setProxySearchDedicatedKey(searchKey);
+
+    // 启动代理（优先历史端口）
+    const preferredPort = parseProxyPortFromConfig();
+    const actualPort = await startAuthProxy(preferredPort > 0 ? preferredPort : undefined);
+
+    // 同步 config（仅端口变化时写入）
+    ensureProxyConfig(actualPort);
+  } catch (err: any) {
+    log.error(`[auth-proxy] ensureAuthProxy failed: ${err.message}`);
+  }
 }
 
 // 启动 OAuth token 定时刷新（幂等：内部先 stop 再 start）
 function ensureOAuthTokenRefresh(): void {
   startTokenRefresh((refreshedToken) => {
-    try {
-      const cfg = readUserConfig();
-      if (cfg?.models?.providers?.["kimi-coding"]) {
-        cfg.models.providers["kimi-coding"].apiKey = refreshedToken.access_token;
-        writeUserConfig(cfg);
-        requestGatewayRestart("oauth-token-refresh");
-      }
-    } catch (err: any) {
-      log.error(`OAuth token 刷新后更新配置失败: ${err.message}`);
-    }
+    // 直接更新代理内存中的 token，不再写 config
+    setProxyAccessToken(refreshedToken.access_token);
   });
 }
 
 function requestGatewayStop(source: string): void {
-  try {
-    gateway.stop();
-  } catch (err) {
+  gateway.stop().catch((err) => {
     log.error(`Gateway 停止失败(${source}): ${err}`);
-  }
+  });
 }
 
 // ── IPC 注册 ──
@@ -442,14 +561,12 @@ ipcMain.on("gateway:restart", () => requestGatewayRestart("ipc:restart"));
 ipcMain.on("gateway:start", () => requestGatewayStart("ipc:start"));
 ipcMain.on("gateway:stop", () => requestGatewayStop("ipc:stop"));
 ipcMain.handle("gateway:state", () => gateway.getState());
+ipcMain.on("app:quit", () => app.quit());
 ipcMain.on("app:check-updates", () => checkForUpdates(true));
 ipcMain.handle("app:get-update-state", () => getUpdateBannerState());
 ipcMain.handle("app:download-and-install-update", () => downloadAndInstallUpdate());
-ipcMain.handle("app:get-pairing-state", () => pairingMonitor?.getState());
-ipcMain.on("app:refresh-pairing-state", () => pairingMonitor?.triggerNow());
-ipcMain.handle("app:get-feishu-pairing-state", () => pairingMonitor?.getState().channels.feishu);
-ipcMain.on("app:refresh-feishu-pairing-state", () => pairingMonitor?.triggerNow());
-ipcMain.handle("app:open-external", (_e, url: string) => shell.openExternal(url));
+ipcMain.handle("app:open-external", (_e, url: string) => shell.openExternal(appendChannelUtm(url)));
+ipcMain.handle("app:open-path", (_e, filePath: string) => shell.openPath(filePath));
 
 // 文件选择对话框 — 返回文件绝对路径数组
 ipcMain.handle("dialog:select-files", async (_e, options?: { filters?: Electron.FileFilter[] }) => {
@@ -464,6 +581,105 @@ ipcMain.handle("dialog:select-files", async (_e, options?: { filters?: Electron.
     return [];
   }
   return result.filePaths;
+});
+
+// 读取剪贴板中的文件路径（macOS: NSFilenamesPboardType, Windows: CF_HDROP）
+ipcMain.handle("clipboard:read-file-paths", () => {
+  try {
+    if (process.platform === "darwin") {
+      // macOS 剪贴板文件列表是 XML plist 格式
+      const buf = clipboard.readBuffer("NSFilenamesPboardType");
+      if (!buf?.length) return [];
+      const xml = buf.toString("utf-8");
+      const paths: string[] = [];
+      // 简单解析 <string>...</string> 标签提取路径
+      const re = /<string>(.*?)<\/string>/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml)) !== null) {
+        if (m[1] && !m[1].includes("<")) paths.push(m[1]);
+      }
+      return paths;
+    }
+    if (process.platform === "win32") {
+      const buf = clipboard.readBuffer("FileNameW");
+      if (!buf?.length) return [];
+      // Windows FileNameW 是 UTF-16LE 以 null 结尾的路径
+      const raw = buf.toString("utf16le").replace(/\0+$/, "");
+      return raw ? [raw] : [];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+});
+
+// ── Release Notes：读取打包的 changelog 并按版本过滤 ──
+
+// 版本号数值化比较（YYYY.MMDD.N 格式不适合字符串比较）
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((s) => parseInt(s, 10) || 0);
+  const pb = b.split(".").map((s) => parseInt(s, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+ipcMain.handle("app:get-release-notes", () => {
+  try {
+    const notesPath = path.join(app.getAppPath(), "release-notes.json");
+    const raw = fs.readFileSync(notesPath, "utf-8");
+    const allEntries: Array<{ version: string; notes: { zh?: string; en?: string } }> = JSON.parse(raw);
+    if (!Array.isArray(allEntries)) return null;
+
+    const currentVersion = app.getVersion();
+    const config = readOneclawConfig();
+    const lastShown = config?.lastShownReleaseNotesVersion;
+
+    // 首次安装不弹更新日志，静默标记当前版本
+    if (!lastShown) {
+      if (config) {
+        config.lastShownReleaseNotesVersion = currentVersion;
+        writeOneclawConfig(config);
+      }
+      return { currentVersion, entries: [], locale: app.getLocale() };
+    }
+
+    // 过滤出 lastShown < version <= currentVersion 的条目
+    const entries = allEntries.filter((entry) => {
+      if (!entry?.version) return false;
+      if (lastShown && compareVersions(entry.version, lastShown) <= 0) return false;
+      if (compareVersions(entry.version, currentVersion) > 0) return false;
+      return true;
+    });
+
+    // 按版本降序排列（最新在前）
+    entries.sort((a, b) => compareVersions(b.version, a.version));
+
+    return {
+      currentVersion,
+      entries,
+      locale: app.getLocale(),
+    };
+  } catch (err: any) {
+    log.error(`读取 release-notes.json 失败: ${err?.message ?? err}`);
+    return null;
+  }
+});
+
+ipcMain.handle("app:dismiss-release-notes", (_e, version: string) => {
+  // 参数校验：version 必须是非空字符串
+  if (typeof version !== "string" || !version.trim()) return;
+  try {
+    // 配置不存在时直接跳过，避免用空对象覆盖已有字段
+    const config = readOneclawConfig();
+    if (!config) return;
+    config.lastShownReleaseNotesVersion = version;
+    writeOneclawConfig(config);
+  } catch (err: any) {
+    log.error(`写入 lastShownReleaseNotesVersion 失败: ${err?.message ?? err}`);
+  }
 });
 
 // Chat UI 侧边栏 IPC
@@ -481,11 +697,24 @@ ipcMain.on("app:open-webui", () => {
 });
 ipcMain.handle("gateway:port", () => gateway.getPort());
 
-registerSetupIpc({ setupManager, gateway, onOAuthLoginSuccess: ensureOAuthTokenRefresh });
+registerSetupIpc({
+  windowManager,
+  ensureGatewayRunning,
+  onOAuthLoginSuccess: ensureOAuthTokenRefresh,
+  onBrowserModeChanged: () => requestGatewayRestart("setup:webbridge-fallback"),
+});
 registerSettingsIpc({
   requestGatewayRestart: () => requestGatewayRestart("settings:kimi-search"),
+  getGatewayToken: () => gateway.getToken(),
 });
 registerSkillStoreIpc();
+registerWorkspaceIpc();
+registerFeedbackIpc({
+  getGatewayState: () => gateway.getState(),
+  getGatewayPort: () => gateway.getPort(),
+  getGatewayStartedAt: () => gateway.getStartedAt(),
+  getAppStartTime: () => appStartTime,
+});
 
 // ── Live2D IPC ──
 
@@ -612,44 +841,23 @@ speechEngine.onFinalResult(async (text: string) => {
 
 async function quit(): Promise<void> {
   stopTokenRefresh();
+  await stopAuthProxy();
   stopAutoCheckSchedule();
-  pairingMonitor?.stop();
   analytics.track("app_closed");
   await analytics.shutdown();
   live2dManager.destroy();
   speechEngine.destroy();
   windowManager.destroy();
-  gateway.stop();
+  await gateway.stop();
   tray.destroy();
   app.quit();
 }
 
-// ── Setup 完成后：启动 Gateway → 打开主窗口 ──
+// Setup 完成逻辑已内联到 setup-ipc.ts 的 setup:complete handler 中
 
-setupManager.setOnComplete(async () => {
-  const running = await ensureGatewayRunning("setup:complete");
-  if (!running) {
-    return false;
-  }
-
-  try {
-    // gateway schema 兼容：保留 wizard.lastRunAt
-    const config = readUserConfig();
-    config.wizard ??= {};
-    config.wizard.lastRunAt = new Date().toISOString();
-    delete config.wizard.pendingAt;
-    writeUserConfig(config);
-
-    // 写入 oneclaw.config.json 归属标记
-    markSetupComplete();
-  } catch (err: any) {
-    log.error(`写入 setup 完成标记失败: ${err?.message ?? err}`);
-    return false;
-  }
-
-  await showMainWindow();
-  recordSetupBaselineConfigSnapshot();
-  return true;
+// 渲染进程通知 Setup 视图进入/退出状态
+ipcMain.on("app:setup-view-state", (_event, active: boolean) => {
+  windowManager.inSetupView = active;
 });
 
 // ── macOS Dock 可见性：窗口全隐藏时切换纯托盘模式 ──
@@ -810,7 +1018,6 @@ app.whenReady().then(async () => {
     },
     isLive2DEnabled: () => live2dManager.isEnabled(),
   });
-  pairingMonitor?.start();
 
   const configHealth = inspectUserConfigHealth();
   if (configHealth.exists && !configHealth.validJson) {
@@ -842,6 +1049,9 @@ app.whenReady().then(async () => {
       // 状态 1：正常启动
       migrateSessionMemoryHook();
       migrateDisableGatewayUpdateCheck();
+      migrateDeprecatedDingtalkFields();
+      migrateBrowserProfileConfig();
+      migrateKimiPluginDeviceId();
       void reconcileCliOnAppLaunch().catch((err) => {
         log.error(`[migrate] CLI launch reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -854,6 +1064,9 @@ app.whenReady().then(async () => {
       migrateFromLegacy();
       migrateSessionMemoryHook();
       migrateDisableGatewayUpdateCheck();
+      migrateDeprecatedDingtalkFields();
+      migrateBrowserProfileConfig();
+      migrateKimiPluginDeviceId();
       void reconcileCliOnAppLaunch().catch((err) => {
         log.error(`[migrate] CLI launch reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -867,8 +1080,8 @@ app.whenReady().then(async () => {
       break;
 
     case "fresh":
-      // 状态 4：全新安装
-      setupManager.showSetup();
+      // 状态 4：全新安装 → 主窗口显示 Setup 视图
+      await showMainWindow("setup");
       break;
   }
 });
@@ -876,13 +1089,9 @@ app.whenReady().then(async () => {
 // ── 二次启动 → 聚焦已有窗口 ──
 
 app.on("second-instance", () => {
-  if (setupManager.isSetupOpen()) {
-    setupManager.focusSetup();
-  } else {
-    showMainWindow().catch((err) => {
-      log.error(`second-instance 打开主窗口失败: ${err}`);
-    });
-  }
+  showMainWindow().catch((err) => {
+    log.error(`second-instance 打开主窗口失败: ${err}`);
+  });
 });
 
 app.on("web-contents-created", (_event, webContents) => {
@@ -895,13 +1104,9 @@ app.on("web-contents-created", (_event, webContents) => {
 // ── macOS: 点击 Dock 图标时恢复窗口 ──
 
 app.on("activate", () => {
-  if (setupManager.isSetupOpen()) {
-    setupManager.focusSetup();
-  } else {
-    showMainWindow().catch((err) => {
-      log.error(`activate 打开主窗口失败: ${err}`);
-    });
-  }
+  showMainWindow().catch((err) => {
+    log.error(`activate 打开主窗口失败: ${err}`);
+  });
 });
 
 // ── 托盘应用：所有窗口关闭不退出 ──
@@ -913,11 +1118,10 @@ app.on("window-all-closed", () => {
 // ── 退出前清理 ──
 
 app.on("before-quit", () => {
+  stopFeedbackSse();
   // 先放行窗口关闭，避免 close handler 拦截 WM_CLOSE 导致 NSIS 安装器报"无法关闭"
   windowManager.prepareForAppQuit();
-  pairingMonitor?.stop();
-  live2dManager.destroy();
-  speechEngine.destroy();
   windowManager.destroy();
-  gateway.stop();
+  stopAuthProxy();
+  gateway.stop().catch(() => {});
 });
