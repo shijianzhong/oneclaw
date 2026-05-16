@@ -42,8 +42,15 @@ tools/
 private_keys/
 
 .gemini-clipboard/
+.claude/
 
 # Git worktrees
+.worktree/
 .worktrees/
 
+# dev 多实例隔离状态目录
+.dev-state/
+
 docs/plans/
+docs/research/
+docs/progress/

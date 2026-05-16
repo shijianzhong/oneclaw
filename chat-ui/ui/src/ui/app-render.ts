@@ -7,18 +7,41 @@ import { html, nothing } from "lit";
 import type { AppViewState } from "./app-view-state.ts";
 import { parseAgentSessionKey } from "../../../src/routing/session-key.js";
 import { refreshChat, refreshChatAvatar } from "./app-chat.ts";
-import { syncUrlWithSessionKey } from "./app-settings.ts";
 import { loadChatHistory } from "./controllers/chat.ts";
-import { getLocale, t } from "./i18n.ts";
+import { getLocale, getThinkingPhrases, t } from "./i18n.ts";
 import { icons } from "./icons.ts";
 import { renderSidebar } from "./sidebar.ts";
+import { applySessionKeyTransition } from "./session-transition.ts";
+import { resolveMainSessionKey, resolveVisibleSessionSelection } from "./session-visibility.ts";
 import { renderChat } from "./views/chat.ts";
 import { renderExecApprovalPrompt } from "./views/exec-approval.ts";
 import { renderGatewayUrlConfirmation } from "./views/gateway-url-confirmation.ts";
 import { renderRestartGatewayDialog } from "./views/restart-gateway-dialog.ts";
 import { renderSharePrompt } from "./views/share-prompt.ts";
+import { renderWebbridgePillModal } from "./views/webbridge-pill-modal.ts";
+import { renderReleaseNotesModal } from "./views/release-notes-modal.ts";
+import { renderSetupView } from "./views/setup/setup-view.ts";
+import { renderSettingsView, cleanupSettingsView } from "./views/settings/settings-view.ts";
+import {
+  renderFeedbackButton,
+  renderFeedbackDialog,
+  createFeedbackDialogState,
+  type FeedbackDialogState,
+  renderFeedbackPanel,
+  createFeedbackPanelState,
+  type FeedbackPanelState,
+  type FeedbackMessage,
+  type FeedbackThread,
+} from "./views/feedback-dialog.ts";
+import { isThreadUnread, loadFeedbackSeenMap, markFeedbackThreadSeen } from "./feedback-seen.ts";
 import { patchSession, loadSessions } from "./controllers/sessions.ts";
 import { renderSkillStoreView, type SkillStoreState } from "./skill-store-view.ts";
+import { renderWorkspaceView, initWorkspace } from "./views/workspace.ts";
+import { renderCronManage } from "./views/cron-manage.ts";
+import { loadCronRuns, loadCronJobs, loadCronStatus, removeCronJob, toggleCronJob, runCronJob, addCronJob, updateCronJob } from "./controllers/cron.ts";
+import { DEFAULT_CRON_FORM } from "./app-defaults.ts";
+import { isExpiredOneShot } from "./presenter.ts";
+import { pendingSessionLabels, removePendingSessionLabel } from "./session-pending.ts";
 import type { SkillStatusEntry } from "./types.ts";
 import {
   loadSkills,
@@ -44,6 +67,24 @@ declare global {
       skillStoreInstall?: (params?: Record<string, unknown>) => Promise<any>;
       skillStoreUninstall?: (params?: Record<string, unknown>) => Promise<any>;
       skillStoreListInstalled?: () => Promise<any>;
+      workspaceSetRoot?: (root: string) => Promise<any>;
+      workspaceOpenFile?: (filePath: string) => Promise<any>;
+      workspaceOpenFolder?: (filePath: string) => Promise<any>;
+      workspaceListDir?: (dirPath: string) => Promise<any>;
+      workspaceReadFile?: (filePath: string) => Promise<any>;
+      submitFeedback?: (params: { content: string; screenshots: string[]; fileNames?: string[]; includeLogs: boolean; email?: string }) => Promise<{ ok: boolean; id?: number; error?: string }>;
+      feedbackThreads?: () => Promise<{ ok: boolean; data?: any; error?: string }>;
+      feedbackThread?: (id: number) => Promise<{ ok: boolean; data?: any; error?: string }>;
+      feedbackReply?: (id: number, content: string, files?: Array<{name: string; base64: string}>) => Promise<{ ok: boolean; id?: number; message?: unknown; error?: string }>;
+      feedbackPickFiles?: () => Promise<{ files: Array<{name: string; base64: string}> } | null>;
+      feedbackShowErrorDialog?: (params: { title: string; message: string; detail?: string }) => Promise<void>;
+      feedbackSubscribe?: () => Promise<{ ok: boolean }>;
+      feedbackUnsubscribe?: () => Promise<{ ok: boolean }>;
+      onFeedbackEvent?: (cb: (evt: unknown) => void) => () => void;
+      onFeedbackOpen?: (cb: () => void) => () => void;
+      onFeedbackReconnecting?: (cb: () => void) => () => void;
+      onFeedbackReconnected?: (cb: () => void) => () => void;
+      captureWindow?: () => Promise<string | null>;
     };
   }
 }
@@ -68,33 +109,16 @@ function resolveAssistantAvatarUrl(state: AppViewState): string | undefined {
 }
 
 function applySessionKey(state: AppViewState, next: string, syncUrl = false) {
-  if (!next || next === state.sessionKey) {
-    return;
+  const changed = applySessionKeyTransition(
+    state as unknown as Parameters<typeof applySessionKeyTransition>[0],
+    next,
+    syncUrl,
+  );
+  if (changed) {
+    void refreshChatAvatar(state as any);
+    // 拉取最新 sessions 快照，让 context meter 立即反映新会话的 token 占用。
+    void loadSessions(state as any);
   }
-  state.sessionKey = next;
-  state.chatMessage = "";
-  state.chatAttachments = [];
-  state.chatStream = null;
-  (state as any).chatStreamStartedAt = null;
-  state.chatRunId = null;
-  state.chatQueue = [];
-  (state as any).resetToolStream();
-  (state as any).resetChatScroll();
-  state.applySettings({
-    ...state.settings,
-    sessionKey: next,
-    lastActiveSessionKey: next,
-  });
-  if (syncUrl) {
-    syncUrlWithSessionKey(
-      state as unknown as Parameters<typeof syncUrlWithSessionKey>[0],
-      next,
-      true,
-    );
-  }
-  void state.loadAssistantIdentity();
-  void loadChatHistory(state as any);
-  void refreshChatAvatar(state as any);
 }
 
 function resolveSessionOptionLabel(
@@ -117,7 +141,6 @@ function resolveSessionOptions(
   state: AppViewState,
 ): Array<{ key: string; label: string; updatedAt?: number }> {
   const sessions = state.sessionsResult?.sessions ?? [];
-  const current = state.sessionKey?.trim() || "main";
   const seen = new Set<string>();
   const options: Array<{ key: string; label: string; updatedAt?: number }> = [];
 
@@ -139,9 +162,11 @@ function resolveSessionOptions(
     });
   };
 
-  // 收集所有会话（含当前会话和 API 列表）
+  const current = state.sessionKey?.trim() || "main";
   const currentSession = sessions.find((entry) => entry.key === current);
-  pushOption(current, currentSession, true);
+  if (currentSession) {
+    pushOption(current, currentSession, true);
+  }
   for (const session of sessions) {
     pushOption(session.key, session);
   }
@@ -149,10 +174,18 @@ function resolveSessionOptions(
   // 按 updatedAt 降序排列（最近使用的在前，无时间戳的在末尾）
   options.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 
-  if (options.length === 0) {
-    return [{ key: current, label: current }];
-  }
   return options;
+}
+
+function reconcileVisibleSession(state: AppViewState) {
+  if (!state.sessionsResult) {
+    return;
+  }
+  const next = resolveVisibleSessionSelection(state.sessionKey, state.hello, state.sessionsResult);
+  if (!next || next === state.sessionKey) {
+    return;
+  }
+  applySessionKey(state, next, true);
 }
 
 // 侧边栏点击会话：切换 session 并确保回到对话视图
@@ -169,52 +202,69 @@ async function patchSessionFromSidebar(state: AppViewState, key: string, newLabe
   await patchSession(state as any, key, { label: newLabel || null });
 }
 
-// 侧边栏删除回调：归档对话 → 删除会话 → UI 即时更新
+// 正在删除的 session key —— 侧边栏 per-row spinner 状态
+const deletingSessionKeys = new Set<string>();
+
+// 侧边栏删除回调：同步走完 reset + delete，期间该行按钮显示 loading。
 async function deleteSessionFromSidebar(state: AppViewState, key: string) {
   const s = state as any;
-  if (!s.client || !s.connected) {
-    return;
-  }
+  if (!s.client || !s.connected) return;
+  if (deletingSessionKeys.has(key)) return;
+
   const confirmed = window.confirm(t("sidebar.deleteSession"));
-  if (!confirmed) {
-    return;
-  }
+  if (!confirmed) return;
 
-  // 立刻从本地列表移除，UI 即时响应
-  const sessions = state.sessionsResult?.sessions ?? [];
-  state.sessionsResult = {
-    ...state.sessionsResult,
-    sessions: sessions.filter((entry) => entry.key !== key),
-  };
+  deletingSessionKeys.add(key);
+  state.requestUpdate();
 
-  // 删除当前活跃会话时，立刻切换到下一个
-  if (key === state.sessionKey) {
-    const remaining = state.sessionsResult?.sessions ?? [];
-    const nextKey = remaining[0]?.key ?? "main";
-    applySessionKey(state, nextKey, true);
-  }
-
-  // 触发 session-memory hook → 对话摘要归档到 ~/memory/*.md
   try {
-    await s.client.request("sessions.reset", { key, reason: "new" });
-  } catch {
-    // 本地独有会话 gateway 不认识，忽略
-  }
+    // 1) reset：触发 session-memory hook 归档对话摘要；gateway 不认识时忽略。
+    try {
+      await s.client.request("sessions.reset", { key, reason: "new" });
+    } catch {
+      // 本地独有会话（新建未发消息）gateway 不可见，跳过
+    }
 
-  // gateway 后端删除
-  try {
-    await s.client.request("sessions.delete", { key, deleteTranscript: true });
-  } catch {
-    // main 会话等 gateway 可能拒绝，已在上面本地移除
-  }
+    // 2) delete：移除 sessions.json 条目并归档 transcript。
+    try {
+      await s.client.request("sessions.delete", { key, deleteTranscript: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/session not found|unknown session/i.test(msg)) {
+        showToast(state, `${t("sidebar.deleteSessionFailed")}: ${msg}`);
+        return;
+      }
+      // not-found 视作等效成功，继续刷新
+    }
 
-  // 与 gateway 同步最终列表
-  await loadSessions(s);
+    // 3) 成功：全量刷新侧边栏；reconcileVisibleSession 会在活跃会话被删时切到下一个可见会话。
+    removePendingSessionLabel(key);
+    await loadSessions(s);
+    reconcileVisibleSession(state);
+  } finally {
+    deletingSessionKeys.delete(key);
+    state.requestUpdate();
+  }
 }
 
-function setOneClawView(state: AppViewState, next: "chat" | "settings" | "skills") {
-  if ((state.settings.oneclawView ?? "chat") === next) {
+function setOneClawView(state: AppViewState, next: "chat" | "setup" | "settings" | "skills" | "workspace" | "cron" | "feedback") {
+  const prev = state.settings.oneclawView ?? "chat";
+  if (prev === next) {
     return;
+  }
+  // 离开反馈视图：释放截图缓存 + 暂停思考定时器（保留 thinkingThreadIds）+ 断 SSE
+  if (prev === "feedback" && next !== "feedback") {
+    feedbackPanelState = { ...feedbackPanelState, newScreenshots: [], newScreenshotPreviews: [], newFileNames: [] };
+    pauseThinking();
+    unsubscribeFeedbackSse(state);
+  }
+  // 进入反馈视图：建立 SSE 长连接（实时推送）+ 恢复思考动画
+  if (prev !== "feedback" && next === "feedback") {
+    subscribeFeedbackSse(state);
+    resumeThinking(state);
+  }
+  if (prev === "settings" && next !== "settings") {
+    cleanupSettingsView();
   }
   state.applySettings({
     ...state.settings,
@@ -222,13 +272,808 @@ function setOneClawView(state: AppViewState, next: "chat" | "settings" | "skills
   });
 }
 
+// 后台轮询拉取 thread 列表的间隔。SSE 仅在用户进入反馈视图时建立，
+// 平时通过 5 分钟一次的 HTTP 拉取检测"过去未读"，让反馈入口的红点
+// 可以及时反映服务端推送，而不必一直占着 SSE 长连接。
+const FEEDBACK_BACKGROUND_POLL_MS = 5 * 60 * 1000;
+let feedbackBackgroundPollTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 应用启动时调用一次：立刻拉一次 thread 列表（识别启动前后端推送的"过去未读"），
+ * 并启动一个 5 分钟一次的后台轮询。SSE 不在这里建立，只在用户实际打开反馈视图时建立。
+ */
+export function initFeedbackBackground(state: AppViewState) {
+  void loadFeedbackThreads(state);
+  if (feedbackBackgroundPollTimer) return; // 幂等，防热更新重复挂表
+  feedbackBackgroundPollTimer = setInterval(() => {
+    // 用户已经在反馈视图：SSE 在推实时事件，轮询纯属浪费一次 HTTP；跳过。
+    if ((state.settings.oneclawView ?? "chat") === "feedback") return;
+    void loadFeedbackThreads(state);
+  }, FEEDBACK_BACKGROUND_POLL_MS);
+}
+
 // 打开内嵌设置页时可携带目标 tab 提示，减少用户二次定位成本。
-function openSettingsView(state: AppViewState, tabHint: "channels" | null = null) {
+function openSettingsView(state: AppViewState, tabHint: string | null = null) {
   state.settingsTabHint = tabHint;
   setOneClawView(state, "settings");
 }
 
+// ── 反馈面板逻辑 ──
+
+async function openFeedbackView(state: AppViewState) {
+  // 先截图（视图切换前），再打开新建表单
+  let capturedBase64: string | null = null;
+  try {
+    capturedBase64 = (await window.oneclaw?.captureWindow?.()) ?? null;
+  } catch { /* 截图失败不阻塞 */ }
+
+  setOneClawView(state, "feedback");
+
+  const screenshots: string[] = [];
+  const previews: string[] = [];
+  const fileNames: string[] = [];
+  if (capturedBase64) {
+    screenshots.push(capturedBase64);
+    previews.push(`data:image/png;base64,${capturedBase64}`);
+    fileNames.push("screenshot.png");
+  }
+
+  feedbackPanelState = {
+    ...feedbackPanelState,
+    view: "new",
+    newContent: "",
+    newEmail: "",
+    newScreenshots: screenshots,
+    newScreenshotPreviews: previews,
+    newFileNames: fileNames,
+    newPreviewSrc: null,
+    newIncludeLogs: true,
+    newSubmitting: false,
+    newError: null,
+  };
+
+  loadFeedbackThreads(state);
+}
+
+async function loadFeedbackThreads(state: AppViewState) {
+  feedbackPanelState = { ...feedbackPanelState, threadsLoading: true, threadsError: null };
+  state.requestUpdate();
+  try {
+    const result = await window.oneclaw?.feedbackThreads?.();
+    if (result?.ok && result.data) {
+      const threads = Array.isArray(result.data) ? result.data : (result.data.items ?? result.data.threads ?? []);
+      // 合并"过去未读"：客户端不在线期间后端推送的回复，对照本地 seenMap 标红
+      const seenMap = loadFeedbackSeenMap();
+      // 排除"用户当前正在看"的 thread：即使 last_reply_at > seen，也不算未读，
+      // 避免 thread.updated 事件和 message.created 时间戳分歧导致误标红
+      const viewingId = feedbackPanelState.view === "detail" ? feedbackPanelState.detailThread?.id ?? null : null;
+      const pastUnread = threads
+        .filter((t: FeedbackThread) => t.id !== viewingId && isThreadUnread(t, seenMap))
+        .map((t: FeedbackThread) => t.id);
+      const mergedUnread = Array.from(new Set([
+        ...feedbackPanelState.unreadThreadIds.filter((id) => id !== viewingId),
+        ...pastUnread,
+      ]));
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        threads,
+        threadsLoading: false,
+        unreadThreadIds: mergedUnread,
+      };
+    } else {
+      feedbackPanelState = { ...feedbackPanelState, threadsLoading: false, threadsError: result?.error || "Failed to load" };
+    }
+  } catch {
+    feedbackPanelState = { ...feedbackPanelState, threadsLoading: false, threadsError: "Failed to load" };
+  }
+  state.requestUpdate();
+}
+
+async function loadFeedbackThreadDetail(state: AppViewState, id: number) {
+  // 重连时同样调用本函数；为保住"在途的 pending 占位"，仅当当前正打开的就是 id 时保留占位，
+  // 切换到不同 thread 时按原逻辑清空。
+  const samethread = feedbackPanelState.detailThread?.id === id;
+  const pendingPlaceholders = samethread
+    ? (feedbackPanelState.detailMessages ?? []).filter((m) => m._pending)
+    : [];
+  feedbackPanelState = { ...feedbackPanelState, view: "detail", detailLoading: true, detailThread: null, detailMessages: [], detailReplyContent: "", detailReplyFiles: [], detailReplyFilePreviews: [], detailReplyFileNames: [] };
+  state.requestUpdate();
+  try {
+    const result = await window.oneclaw?.feedbackThread?.(id);
+    if (result?.ok && result.data) {
+      const fresh: FeedbackMessage[] = result.data.messages ?? [];
+      // 合并 pending 占位回去，按时间排序；id 去重避免占位与服务端真实消息重复
+      const realIds = new Set(fresh.filter((m) => m.id > 0).map((m) => m.id));
+      const survivedPending = pendingPlaceholders.filter((m) => m.id <= 0 || !realIds.has(m.id));
+      const merged = [...fresh, ...survivedPending].sort((a, b) => a.created_at.localeCompare(b.created_at));
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        detailThread: result.data.feedback ?? result.data,
+        detailMessages: merged,
+        detailLoading: false,
+      };
+    } else {
+      feedbackPanelState = { ...feedbackPanelState, detailLoading: false };
+    }
+  } catch {
+    feedbackPanelState = { ...feedbackPanelState, detailLoading: false };
+  }
+  // 加载完成后，对账 thinking 状态：若 Agent 在用户不在时已经回复，隐藏思考气泡。
+  // 判据：消息列表中最后一条是非 user 消息 → Agent 已回复，thinking 无意义。
+  if (feedbackPanelState.thinkingThreadIds.includes(id)) {
+    const msgs = feedbackPanelState.detailMessages;
+    const last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    if (last && last.role !== "user") {
+      hideThinking(state, id);
+    }
+  }
+  state.requestUpdate();
+  // 首屏直接落到底（instant，避免刚打开 thread 就看到滚动动画）
+  scrollFeedbackMessagesToBottom("auto");
+}
+
+// 详情页消息列表自动滚动：若用户当前在底部附近则跟随新消息，
+// 否则尊重手动滚动位置（例如在读历史），不强制下拉。
+const FEEDBACK_SCROLL_NEAR_BOTTOM_PX = 120;
+
+function getFeedbackMessagesScrollEl(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".feedback-panel__messages");
+}
+
+function isFeedbackMessagesNearBottom(): boolean {
+  const el = getFeedbackMessagesScrollEl();
+  // 没找到容器通常意味着详情页刚打开尚未挂载 → 当作 near-bottom，让首屏直接落到底
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < FEEDBACK_SCROLL_NEAR_BOTTOM_PX;
+}
+
+function scrollFeedbackMessagesToBottom(behavior: ScrollBehavior = "smooth") {
+  // 双 rAF：第一帧等 Lit 调度的 DOM 更新落盘，第二帧等浏览器 layout 完成
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const el = getFeedbackMessagesScrollEl();
+      if (!el) return;
+      el.scrollTo({ top: el.scrollHeight, behavior });
+    });
+  });
+}
+
+/** 把后端原始错误码映射成用户友好的中英文文案 */
+function translateFeedbackError(err: string | undefined): { title: string; message: string; detail: string } {
+  const raw = err || "";
+  const isZh = getLocale() === "zh";
+  // 已知错误码：消息数量超限
+  if (/message limit reached/i.test(raw)) {
+    return {
+      title: isZh ? "发送失败" : "Send failed",
+      message: isZh ? "此对话的消息已达上限" : "Message limit reached",
+      detail: isZh
+        ? "这个反馈会话的消息数量已经达到上限（50 条），无法继续发送。\n如需继续咨询，请新建一个反馈。"
+        : "This feedback thread has reached its 50-message limit.\nPlease create a new feedback to continue.",
+    };
+  }
+  // 网络超时
+  if (/timeout/i.test(raw)) {
+    return {
+      title: isZh ? "发送失败" : "Send failed",
+      message: isZh ? "请求超时" : "Request timeout",
+      detail: isZh ? "请检查网络连接后重试。" : "Please check your network connection and try again.",
+    };
+  }
+  // HTTP 状态码
+  const httpMatch = raw.match(/^HTTP (\d+)/);
+  if (httpMatch) {
+    return {
+      title: isZh ? "发送失败" : "Send failed",
+      message: isZh ? `服务器返回错误 (${httpMatch[1]})` : `Server error (${httpMatch[1]})`,
+      detail: raw,
+    };
+  }
+  // 兜底
+  return {
+    title: isZh ? "发送失败" : "Send failed",
+    message: isZh ? "消息发送失败" : "Failed to send message",
+    detail: raw || (isZh ? "未知错误" : "Unknown error"),
+  };
+}
+
+/** 弹出原生错误对话框（通过 IPC 调用主进程的 dialog.showMessageBox） */
+function showFeedbackReplyErrorDialog(err: string | undefined): Promise<void> | void {
+  const payload = translateFeedbackError(err);
+  return window.oneclaw?.feedbackShowErrorDialog?.(payload);
+}
+
+/** 详情页 scroll 事件回调：用户滚到底部时清除"有新消息"提示 */
+function handleFeedbackDetailScroll(state: AppViewState) {
+  if (isFeedbackMessagesNearBottom() && feedbackPanelState.hasNewMessagesBelow) {
+    feedbackPanelState = { ...feedbackPanelState, hasNewMessagesBelow: false };
+    state.requestUpdate();
+  }
+}
+
+type FeedbackSseEvent =
+  | { type: "message.created"; thread_id: number; message: FeedbackMessage & { feedback_id: number } }
+  | { type: "thread.updated"; thread_id: number; thread: Partial<FeedbackThread> & { id: number } }
+  | { type: "agent.thinking"; thread_id: number }
+  | { type: "agent.done"; thread_id: number }
+  | { type: "agent.manual_pending"; thread_id: number }
+  | { type: "agent.online"; thread_id: number };
+
+// thread_id → 5 分钟自动隐藏定时器；防 agent.done 丢失导致动画卡死
+const thinkingSafetyTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const THINKING_SAFETY_TIMEOUT_MS = 300_000; // 5 分钟，对齐设计文档 §3.3 的客户端建议
+
+// ── "AI 思考中" 轮播短语 ──
+let thinkingPhraseIndex = 0;
+let thinkingPhraseTimer: ReturnType<typeof setInterval> | null = null;
+const THINKING_PHRASE_INTERVAL_MS = 3_000; // 每 3 秒切换一条
+
+/** 有任意 thread 在 thinking 时启动轮播定时器 */
+function startPhraseRotation(state: AppViewState) {
+  if (thinkingPhraseTimer) return; // 已在运行
+  const phrases = getThinkingPhrases();
+  thinkingPhraseIndex = 0;
+  feedbackPanelState = { ...feedbackPanelState, thinkingPhrase: phrases[0] };
+  thinkingPhraseTimer = setInterval(() => {
+    const p = getThinkingPhrases();
+    thinkingPhraseIndex = (thinkingPhraseIndex + 1) % p.length;
+    feedbackPanelState = { ...feedbackPanelState, thinkingPhrase: p[thinkingPhraseIndex] };
+    state.requestUpdate();
+  }, THINKING_PHRASE_INTERVAL_MS);
+}
+
+/** 所有 thinking 结束后停止轮播 */
+function stopPhraseRotation() {
+  if (thinkingPhraseTimer) {
+    clearInterval(thinkingPhraseTimer);
+    thinkingPhraseTimer = null;
+  }
+  thinkingPhraseIndex = 0;
+  feedbackPanelState = { ...feedbackPanelState, thinkingPhrase: "" };
+}
+
+function showThinking(state: AppViewState, threadId: number) {
+  // 重置 5 分钟兜底（同一 thread 收到二次 thinking 不应延长，但收到 done 后再来新 thinking 需重启）
+  const existing = thinkingSafetyTimers.get(threadId);
+  if (existing) clearTimeout(existing);
+  thinkingSafetyTimers.set(
+    threadId,
+    setTimeout(() => hideThinking(state, threadId), THINKING_SAFETY_TIMEOUT_MS),
+  );
+  if (feedbackPanelState.thinkingThreadIds.includes(threadId)) return;
+  const wasEmpty = feedbackPanelState.thinkingThreadIds.length === 0;
+  feedbackPanelState = {
+    ...feedbackPanelState,
+    thinkingThreadIds: [...feedbackPanelState.thinkingThreadIds, threadId],
+  };
+  if (wasEmpty) startPhraseRotation(state);
+}
+
+function hideThinking(state: AppViewState, threadId: number) {
+  const timer = thinkingSafetyTimers.get(threadId);
+  if (timer) {
+    clearTimeout(timer);
+    thinkingSafetyTimers.delete(threadId);
+  }
+  if (!feedbackPanelState.thinkingThreadIds.includes(threadId)) return;
+  feedbackPanelState = {
+    ...feedbackPanelState,
+    thinkingThreadIds: feedbackPanelState.thinkingThreadIds.filter((x) => x !== threadId),
+  };
+  if (feedbackPanelState.thinkingThreadIds.length === 0) stopPhraseRotation();
+  state.requestUpdate();
+}
+
+/** 暂停定时器和轮播，但保留 thinkingThreadIds，用户回来时可恢复。 */
+function pauseThinking() {
+  for (const t of thinkingSafetyTimers.values()) clearTimeout(t);
+  thinkingSafetyTimers.clear();
+  stopPhraseRotation();
+}
+
+/** 进入反馈视图时，为保留的 thinkingThreadIds 重启安全定时器和轮播。 */
+function resumeThinking(state: AppViewState) {
+  if (feedbackPanelState.thinkingThreadIds.length === 0) return;
+  for (const tid of feedbackPanelState.thinkingThreadIds) {
+    thinkingSafetyTimers.set(tid, setTimeout(() => hideThinking(state, tid), THINKING_SAFETY_TIMEOUT_MS));
+  }
+  startPhraseRotation(state);
+}
+
+/** 清除某 thread 的"人工回复模式"提示 */
+function clearManualPending(threadId: number) {
+  if (!feedbackPanelState.manualPendingThreadIds.includes(threadId)) return;
+  feedbackPanelState = {
+    ...feedbackPanelState,
+    manualPendingThreadIds: feedbackPanelState.manualPendingThreadIds.filter((x) => x !== threadId),
+  };
+}
+
+// thread_id → "智能客服已上线"短暂提示的自动清除定时器
+const agentOnlineTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const AGENT_ONLINE_DISPLAY_MS = 5_000; // 5 秒后自动隐藏
+
+/** 清除某 thread 的"智能客服已上线"短暂提示 */
+function clearAgentOnline(threadId: number) {
+  const timer = agentOnlineTimers.get(threadId);
+  if (timer) {
+    clearTimeout(timer);
+    agentOnlineTimers.delete(threadId);
+  }
+  if (!feedbackPanelState.agentOnlineThreadIds.includes(threadId)) return;
+  feedbackPanelState = {
+    ...feedbackPanelState,
+    agentOnlineThreadIds: feedbackPanelState.agentOnlineThreadIds.filter((x) => x !== threadId),
+  };
+}
+
+function appendDetailMessageDedup(msg: FeedbackMessage) {
+  const list = feedbackPanelState.detailMessages ?? [];
+  // 以 id 为主键去重；id <= 0 表示乐观占位，不参与去重判定。
+  // 不再按 content 移除占位 —— SSE echo 乱序时按 content 匹配会错配；占位由 POST 响应路径用 _tempKey 精确替换。
+  if (msg.id > 0 && list.some((m) => m.id === msg.id)) return;
+  const merged = [...list, msg].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  feedbackPanelState = { ...feedbackPanelState, detailMessages: merged };
+}
+
+function handleFeedbackEvent(state: AppViewState, evt: FeedbackSseEvent) {
+  // 只有 view=detail 时才视为"正在看"；list/new 视图下 detailThread 可能是上次残留
+  const openId = feedbackPanelState.view === "detail"
+    ? feedbackPanelState.detailThread?.id ?? null
+    : null;
+  // 在 state 变化之前拍一次"是否已滚到底部附近"快照，用于决定是否跟随新内容滚动
+  const wasNearBottom = openId === evt.thread_id ? isFeedbackMessagesNearBottom() : false;
+
+  if (evt.type === "message.created") {
+    const incoming: FeedbackMessage = {
+      id: evt.message.id,
+      thread_id: evt.message.feedback_id ?? evt.thread_id,
+      role: evt.message.role,
+      content: evt.message.content,
+      file_keys: evt.message.file_keys ?? [],
+      created_at: evt.message.created_at,
+    };
+    if (openId === evt.thread_id) {
+      // 当前正在看这个 thread → 去重 append + 推进 seen 时间戳，
+      // 避免"边看边来新消息，关掉重开又被算未读"
+      appendDetailMessageDedup(incoming);
+      markFeedbackThreadSeen(evt.thread_id, incoming.created_at);
+    } else if (incoming.role !== "user") {
+      // 其他 thread 且不是自己发的 → 标记未读
+      if (!feedbackPanelState.unreadThreadIds.includes(evt.thread_id)) {
+        feedbackPanelState = {
+          ...feedbackPanelState,
+          unreadThreadIds: [...feedbackPanelState.unreadThreadIds, evt.thread_id],
+        };
+      }
+    }
+    // 非 user 消息到达 → 清除所有状态提示（thinking + manualPending + agentOnline）
+    if (incoming.role !== "user") {
+      hideThinking(state, evt.thread_id);
+      clearManualPending(evt.thread_id);
+      clearAgentOnline(evt.thread_id);
+    }
+    state.requestUpdate();
+    // 当前打开的 thread 新增气泡
+    if (openId === evt.thread_id) {
+      if (wasNearBottom) {
+        // 用户在底部 → 跟随滚动
+        scrollFeedbackMessagesToBottom("smooth");
+      } else if (incoming.role !== "user") {
+        // 用户不在底部 + 官方回复 → 显示"有新消息"浮动提示
+        feedbackPanelState = { ...feedbackPanelState, hasNewMessagesBelow: true };
+        state.requestUpdate();
+      }
+    }
+  } else if (evt.type === "thread.updated") {
+    const idx = feedbackPanelState.threads.findIndex((t) => t.id === evt.thread_id);
+    if (idx >= 0) {
+      const prev = feedbackPanelState.threads[idx];
+      const next = { ...prev, ...evt.thread } as FeedbackThread;
+      const threads = [...feedbackPanelState.threads];
+      threads[idx] = next;
+      // last_reply_at 变化 + 非当前打开的 thread → 标记未读（设计文档 §3.3：thread.updated 用于列表页红点）
+      const replyChanged = evt.thread.last_reply_at && evt.thread.last_reply_at !== prev.last_reply_at;
+      const unread = replyChanged && openId !== evt.thread_id
+        && !feedbackPanelState.unreadThreadIds.includes(evt.thread_id);
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        threads,
+        ...(unread ? { unreadThreadIds: [...feedbackPanelState.unreadThreadIds, evt.thread_id] } : {}),
+      };
+      // 用户正在看该 thread → 同步推进 seen 时间戳，避免后续 loadFeedbackThreads
+      // 用旧 seen 对比新 last_reply_at 误标未读（即使没收到 message.created 也能兜住）
+      if (openId === evt.thread_id && evt.thread.last_reply_at) {
+        markFeedbackThreadSeen(evt.thread_id, evt.thread.last_reply_at);
+      }
+      state.requestUpdate();
+    }
+  } else if (evt.type === "agent.thinking") {
+    showThinking(state, evt.thread_id);
+    // 收到 thinking 说明 agent 已开始跑 → 清除人工回复和"AI 已上线"提示
+    clearManualPending(evt.thread_id);
+    clearAgentOnline(evt.thread_id);
+    state.requestUpdate();
+    // 思考动画出现在消息列表底部 → 用户原本贴底就跟着滚下来
+    if (openId === evt.thread_id && wasNearBottom) {
+      scrollFeedbackMessagesToBottom("smooth");
+    }
+  } else if (evt.type === "agent.manual_pending") {
+    // 人工回复模式 → 显示提示（同时清除 "AI 已上线"，避免旧提示残留）
+    clearAgentOnline(evt.thread_id);
+    if (!feedbackPanelState.manualPendingThreadIds.includes(evt.thread_id)) {
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        manualPendingThreadIds: [...feedbackPanelState.manualPendingThreadIds, evt.thread_id],
+      };
+    }
+    state.requestUpdate();
+    if (openId === evt.thread_id && wasNearBottom) {
+      scrollFeedbackMessagesToBottom("smooth");
+    }
+  } else if (evt.type === "agent.online") {
+    // /auto on → 仅当当前正在显示"人工客服已接管"时，才替换为"智能客服已上线"短暂提示。
+    // 如果用户此前没看到过人工回复提示，就静默切换（不打扰）。
+    const wasManualPending = feedbackPanelState.manualPendingThreadIds.includes(evt.thread_id);
+    clearManualPending(evt.thread_id);
+    if (wasManualPending) {
+      // 已有定时器则重置
+      const existing = agentOnlineTimers.get(evt.thread_id);
+      if (existing) clearTimeout(existing);
+      if (!feedbackPanelState.agentOnlineThreadIds.includes(evt.thread_id)) {
+        feedbackPanelState = {
+          ...feedbackPanelState,
+          agentOnlineThreadIds: [...feedbackPanelState.agentOnlineThreadIds, evt.thread_id],
+        };
+      }
+      agentOnlineTimers.set(
+        evt.thread_id,
+        setTimeout(() => {
+          clearAgentOnline(evt.thread_id);
+          state.requestUpdate();
+        }, AGENT_ONLINE_DISPLAY_MS),
+      );
+    }
+    state.requestUpdate();
+  } else if (evt.type === "agent.done") {
+    // 静默隐藏思考动画，不向用户暴露 Agent 成功/失败状态
+    hideThinking(state, evt.thread_id);
+  }
+  // 未知 type 默认忽略，符合设计文档 §3.1 约定
+}
+
+function subscribeFeedbackSse(state: AppViewState) {
+  if (feedbackSseUnsub) return; // 幂等
+  void window.oneclaw?.feedbackSubscribe?.();
+  feedbackSseUnsub = window.oneclaw?.onFeedbackEvent?.((evt) => {
+    handleFeedbackEvent(state, evt as FeedbackSseEvent);
+  }) ?? null;
+  feedbackReconnectedUnsub = window.oneclaw?.onFeedbackReconnected?.(() => {
+    // 重连成功（首字节到达）→ 兜底刷新列表 + 打开的详情
+    loadFeedbackThreads(state);
+    const openId = feedbackPanelState.detailThread?.id ?? null;
+    if (openId) void loadFeedbackThreadDetail(state, openId);
+  }) ?? null;
+}
+
+function unsubscribeFeedbackSse(_state: AppViewState) {
+  feedbackSseUnsub?.();
+  feedbackReconnectedUnsub?.();
+  feedbackSseUnsub = null;
+  feedbackReconnectedUnsub = null;
+  void window.oneclaw?.feedbackUnsubscribe?.();
+  // 注意：不在这里清 thinkingThreadIds —— 由 setOneClawView 调用 pauseThinking 保留状态，
+  // 用户重新进入时通过 resumeThinking 恢复。clearAllThinking 仅在应用退出等场景使用。
+}
+
+function buildFeedbackPanelCallbacks(state: AppViewState) {
+  return {
+    onLoadThreads: () => loadFeedbackThreads(state),
+    onOpenNew: () => {
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        view: "new",
+        newContent: "",
+        newEmail: "",
+        newScreenshots: [],
+        newScreenshotPreviews: [],
+        newFileNames: [],
+        newPreviewSrc: null,
+        newIncludeLogs: true,
+        newSubmitting: false,
+        newError: null,
+      };
+      state.requestUpdate();
+    },
+    onOpenDetail: (id: number) => {
+      // 清除该 thread 的未读标记 + 持久化"已读到现在"，
+      // 这样下次重启 OneClaw 时这个 thread 不会被算成"过去未读"
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        unreadThreadIds: feedbackPanelState.unreadThreadIds.filter((x) => x !== id),
+        hasNewMessagesBelow: false,
+      };
+      markFeedbackThreadSeen(id);
+      void loadFeedbackThreadDetail(state, id);
+    },
+    onBackToList: () => {
+      // 离开 detail 前，用所有已知时间戳的最大值刷新 seenMap，
+      // 确保 loadFeedbackThreads 拉到的 last_reply_at 不会大于 seen
+      const thread = feedbackPanelState.detailThread;
+      if (thread) {
+        const msgs = feedbackPanelState.detailMessages;
+        const candidates = [
+          new Date().toISOString(),
+          thread.last_reply_at || "",
+          thread.updated_at || "",
+          msgs.length > 0 ? msgs[msgs.length - 1].created_at : "",
+        ];
+        const latest = candidates.sort().pop()!;
+        markFeedbackThreadSeen(thread.id, latest);
+      }
+      feedbackPanelState = { ...feedbackPanelState, view: "list" };
+      loadFeedbackThreads(state);
+    },
+    onNewContentChange: (value: string) => {
+      feedbackPanelState = { ...feedbackPanelState, newContent: value };
+      state.requestUpdate();
+    },
+    onNewEmailChange: (value: string) => {
+      feedbackPanelState = { ...feedbackPanelState, newEmail: value };
+      state.requestUpdate();
+    },
+    onNewToggleLogs: (checked: boolean) => {
+      feedbackPanelState = { ...feedbackPanelState, newIncludeLogs: checked };
+      state.requestUpdate();
+    },
+    onNewAddScreenshots: (files: FileList) => {
+      Array.from(files).forEach((file) => {
+        const isImage = file.type.startsWith("image/");
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          const base64 = dataUrl.split(",")[1];
+          feedbackPanelState = {
+            ...feedbackPanelState,
+            newScreenshots: [...feedbackPanelState.newScreenshots, base64],
+            newScreenshotPreviews: [...feedbackPanelState.newScreenshotPreviews, isImage ? dataUrl : ""],
+            newFileNames: [...feedbackPanelState.newFileNames, file.name],
+          };
+          state.requestUpdate();
+        };
+        reader.readAsDataURL(file);
+      });
+    },
+    onNewPickFiles: async () => {
+      const result = await window.oneclaw?.feedbackPickFiles?.();
+      if (!result?.files?.length) return;
+      for (const f of result.files) {
+        const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name);
+        feedbackPanelState = {
+          ...feedbackPanelState,
+          newScreenshots: [...feedbackPanelState.newScreenshots, f.base64],
+          newScreenshotPreviews: [...feedbackPanelState.newScreenshotPreviews, isImage ? `data:image/png;base64,${f.base64}` : ""],
+          newFileNames: [...feedbackPanelState.newFileNames, f.name],
+        };
+      }
+      state.requestUpdate();
+    },
+    onNewRemoveScreenshot: (index: number) => {
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        newScreenshots: feedbackPanelState.newScreenshots.filter((_, i) => i !== index),
+        newScreenshotPreviews: feedbackPanelState.newScreenshotPreviews.filter((_, i) => i !== index),
+        newFileNames: feedbackPanelState.newFileNames.filter((_, i) => i !== index),
+      };
+      state.requestUpdate();
+    },
+    onNewPaste: (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith("image/")) {
+          e.preventDefault();
+          const file = item.getAsFile();
+          if (!file) continue;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result as string;
+            const base64 = dataUrl.split(",")[1];
+            feedbackPanelState = {
+              ...feedbackPanelState,
+              newScreenshots: [...feedbackPanelState.newScreenshots, base64],
+              newScreenshotPreviews: [...feedbackPanelState.newScreenshotPreviews, dataUrl],
+            };
+            state.requestUpdate();
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    },
+    onNewPreviewScreenshot: (src: string | null) => {
+      feedbackPanelState = { ...feedbackPanelState, newPreviewSrc: src };
+      state.requestUpdate();
+    },
+    onNewSubmit: async () => {
+      feedbackPanelState = { ...feedbackPanelState, newSubmitting: true, newError: null };
+      state.requestUpdate();
+      try {
+        const result = await window.oneclaw?.submitFeedback?.({
+          content: feedbackPanelState.newContent,
+          screenshots: feedbackPanelState.newScreenshots,
+          fileNames: feedbackPanelState.newFileNames,
+          includeLogs: feedbackPanelState.newIncludeLogs,
+          email: feedbackPanelState.newEmail || undefined,
+        });
+        if (result?.ok) {
+          feedbackPanelState = { ...feedbackPanelState, newSubmitting: false };
+          showToast(state, t("feedback.success"));
+          if (result.id) {
+            // 有 id → 直接跳转新建的 thread 详情
+            loadFeedbackThreads(state);
+            void loadFeedbackThreadDetail(state, result.id);
+          } else {
+            // 无 id → 回退到列表
+            feedbackPanelState = { ...feedbackPanelState, view: "list" };
+            loadFeedbackThreads(state);
+          }
+        } else {
+          feedbackPanelState = { ...feedbackPanelState, newSubmitting: false, newError: result?.error || t("feedback.error") };
+        }
+      } catch {
+        feedbackPanelState = { ...feedbackPanelState, newSubmitting: false, newError: t("feedback.error") };
+      }
+      state.requestUpdate();
+    },
+    onReplyChange: (value: string) => {
+      feedbackPanelState = { ...feedbackPanelState, detailReplyContent: value };
+      state.requestUpdate();
+    },
+    onReplyAddFiles: (files: FileList) => {
+      Array.from(files).forEach((file) => {
+        const isImage = file.type.startsWith("image/");
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          const base64 = dataUrl.split(",")[1];
+          feedbackPanelState = {
+            ...feedbackPanelState,
+            detailReplyFiles: [...feedbackPanelState.detailReplyFiles, base64],
+            detailReplyFilePreviews: [...feedbackPanelState.detailReplyFilePreviews, isImage ? dataUrl : ""],
+            detailReplyFileNames: [...feedbackPanelState.detailReplyFileNames, file.name],
+          };
+          state.requestUpdate();
+        };
+        reader.readAsDataURL(file);
+      });
+    },
+    onReplyPickFiles: async () => {
+      const result = await window.oneclaw?.feedbackPickFiles?.();
+      if (!result?.files?.length) return;
+      for (const f of result.files) {
+        const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name);
+        feedbackPanelState = {
+          ...feedbackPanelState,
+          detailReplyFiles: [...feedbackPanelState.detailReplyFiles, f.base64],
+          detailReplyFilePreviews: [...feedbackPanelState.detailReplyFilePreviews, isImage ? `data:image/png;base64,${f.base64}` : ""],
+          detailReplyFileNames: [...feedbackPanelState.detailReplyFileNames, f.name],
+        };
+      }
+      state.requestUpdate();
+    },
+    onReplyRemoveFile: (index: number) => {
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        detailReplyFiles: feedbackPanelState.detailReplyFiles.filter((_, i) => i !== index),
+        detailReplyFilePreviews: feedbackPanelState.detailReplyFilePreviews.filter((_, i) => i !== index),
+        detailReplyFileNames: feedbackPanelState.detailReplyFileNames.filter((_, i) => i !== index),
+      };
+      state.requestUpdate();
+    },
+    onDetailScroll: () => handleFeedbackDetailScroll(state),
+    onScrollToBottom: () => {
+      feedbackPanelState = { ...feedbackPanelState, hasNewMessagesBelow: false };
+      state.requestUpdate();
+      scrollFeedbackMessagesToBottom("smooth");
+    },
+    onReplySend: async () => {
+      if (!feedbackPanelState.detailThread || (!feedbackPanelState.detailReplyContent.trim() && feedbackPanelState.detailReplyFiles.length === 0)) return;
+      const threadId = feedbackPanelState.detailThread.id;
+      const content = feedbackPanelState.detailReplyContent;
+      const files = feedbackPanelState.detailReplyFiles.length > 0
+        ? feedbackPanelState.detailReplyFiles.map((base64, i) => ({ name: feedbackPanelState.detailReplyFileNames[i] || `file-${i + 1}`, base64 }))
+        : undefined;
+
+      // 1. 本地先插入临时 pending 气泡
+      const tempKey = `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const tempMsg: FeedbackMessage = {
+        id: 0,
+        thread_id: threadId,
+        role: "user",
+        content,
+        file_keys: [],
+        created_at: new Date().toISOString(),
+        _pending: true,
+        _tempKey: tempKey,
+      };
+      // 乐观更新：本地立刻插入 pending 气泡并清空输入框，不把 detailReplySending 置 true，
+      // 这样 POST 期间（后端可能要 10+ 秒）用户仍可继续输入和发送下一条。
+      feedbackPanelState = {
+        ...feedbackPanelState,
+        detailMessages: [...feedbackPanelState.detailMessages, tempMsg],
+        detailReplyContent: "",
+        detailReplyFiles: [],
+        detailReplyFilePreviews: [],
+        detailReplyFileNames: [],
+      };
+      state.requestUpdate();
+      // 用户主动发消息 → 总是滚到底（不判 near-bottom），让用户看到自己的气泡
+      scrollFeedbackMessagesToBottom("smooth");
+
+      // 2. 后台异步发 POST（不阻塞输入）
+      void (async () => {
+        let result: any;
+        try {
+          result = await window.oneclaw?.feedbackReply?.(threadId, content, files);
+        } catch (err) {
+          feedbackPanelState = {
+            ...feedbackPanelState,
+            detailMessages: feedbackPanelState.detailMessages.map((msg) =>
+              msg._tempKey === tempKey ? { ...msg, _pending: false, _failed: true } : msg,
+            ),
+          };
+          state.requestUpdate();
+          void showFeedbackReplyErrorDialog(String(err));
+          return;
+        }
+        if (result?.ok && result.message) {
+          // 3a. 用真实 message 替换临时占位
+          const m = result.message as any;
+          const real: FeedbackMessage = {
+            id: m.id,
+            thread_id: m.feedback_id ?? threadId,
+            role: m.role ?? "user",
+            content: m.content ?? content,
+            file_keys: m.file_keys ?? [],
+            created_at: m.created_at ?? tempMsg.created_at,
+          };
+          // 移除临时占位 + 追加真实消息；若 SSE echo 已先到，按 id 去重
+          const withoutTemp = feedbackPanelState.detailMessages.filter((msg) => msg._tempKey !== tempKey);
+          const alreadyHasReal = real.id > 0 && withoutTemp.some((msg) => msg.id === real.id);
+          const merged = alreadyHasReal ? withoutTemp : [...withoutTemp, real];
+          merged.sort((a, b) => a.created_at.localeCompare(b.created_at));
+          feedbackPanelState = { ...feedbackPanelState, detailMessages: merged };
+        } else if (result?.ok) {
+          // 3b. 后端 200 但没回 message：客户端按 _tempKey 清占位，否则会永远 pending。
+          // SSE echo 到达时按 id 去重，不会重复显示；老服务端不发 SSE echo 时会丢气泡，下次拉详情时补回。
+          feedbackPanelState = {
+            ...feedbackPanelState,
+            detailMessages: feedbackPanelState.detailMessages.filter((msg) => msg._tempKey !== tempKey),
+          };
+        } else {
+          // 3c. 失败：把临时气泡标红（保留给用户，避免丢字）+ 弹原生错误对话框
+          feedbackPanelState = {
+            ...feedbackPanelState,
+            detailMessages: feedbackPanelState.detailMessages.map((msg) =>
+              msg._tempKey === tempKey ? { ...msg, _pending: false, _failed: true } : msg,
+            ),
+          };
+          void showFeedbackReplyErrorDialog(result?.error);
+        }
+        state.requestUpdate();
+      })();
+    },
+    requestUpdate: () => state.requestUpdate(),
+  };
+}
+
 // ── 技能页子标签 ──
+
+// ── Cron 只读视图状态 ──
+let cronExpandedJobId: string | null = null;
+let cronRunsLoading = false;
+let cronShowForm = false;
+let cronEditingJobId: string | null = null;
 
 // "installed" = 已安装/内置技能（gateway RPC），"store" = 技能商店（clawhub API）
 let skillsSubTab: "installed" | "store" = "installed";
@@ -251,17 +1096,27 @@ const skillStoreState: SkillStoreState = {
   toastMessage: null,
 };
 
-// toast 定时器句柄
-let skillStoreToastTimer: ReturnType<typeof setTimeout> | null = null;
+// ── 反馈弹窗状态 ──
 
-// 显示 toast 并在 4 秒后自动消失
-function showSkillStoreToast(state: AppViewState, message: string) {
-  if (skillStoreToastTimer) clearTimeout(skillStoreToastTimer);
+let feedbackState: FeedbackDialogState = createFeedbackDialogState();
+
+// ── 反馈面板状态 ──
+
+let feedbackPanelState: FeedbackPanelState = createFeedbackPanelState();
+let feedbackSseUnsub: (() => void) | null = null;
+let feedbackReconnectedUnsub: (() => void) | null = null;
+
+// toast 定时器句柄
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+// 显示 toast 并在 4 秒后自动消失（通用方法，复用 skillStore toast UI）
+function showToast(state: AppViewState, message: string) {
+  if (toastTimer) clearTimeout(toastTimer);
   skillStoreState.toastMessage = message;
   state.requestUpdate();
-  skillStoreToastTimer = setTimeout(() => {
+  toastTimer = setTimeout(() => {
     skillStoreState.toastMessage = null;
-    skillStoreToastTimer = null;
+    toastTimer = null;
     state.requestUpdate();
   }, 4000);
 }
@@ -348,10 +1203,10 @@ async function installSkillFromStore(state: AppViewState, slug: string) {
     if (result?.success) {
       skillStoreState.installedSlugs.add(slug);
     } else {
-      showSkillStoreToast(state, t("skillStore.installFailed"));
+      showToast(state, t("skillStore.installFailed"));
     }
   } catch {
-    showSkillStoreToast(state, t("skillStore.installFailed"));
+    showToast(state, t("skillStore.installFailed"));
   }
   skillStoreState.installingSlugs.delete(slug);
   state.requestUpdate();
@@ -367,10 +1222,10 @@ async function uninstallSkillFromStore(state: AppViewState, slug: string) {
     if (result?.success) {
       skillStoreState.installedSlugs.delete(slug);
     } else {
-      showSkillStoreToast(state, t("skillStore.uninstallFailed"));
+      showToast(state, t("skillStore.uninstallFailed"));
     }
   } catch {
-    showSkillStoreToast(state, t("skillStore.uninstallFailed"));
+    showToast(state, t("skillStore.uninstallFailed"));
   }
   skillStoreState.installingSlugs.delete(slug);
   state.requestUpdate();
@@ -388,10 +1243,10 @@ async function uninstallLocalSkill(state: AppViewState, slug: string) {
       void loadSkills(state as unknown as SkillsState);
       await refreshInstalledSlugs();
     } else {
-      showSkillStoreToast(state, t("skillStore.uninstallFailed"));
+      showToast(state, t("skillStore.uninstallFailed"));
     }
   } catch {
-    showSkillStoreToast(state, t("skillStore.uninstallFailed"));
+    showToast(state, t("skillStore.uninstallFailed"));
   }
   state.skillsBusyKey = "";
   state.requestUpdate();
@@ -454,12 +1309,14 @@ function clamp(text: string | undefined, max: number): string {
 function renderInstalledSkillsView(state: AppViewState) {
   const report = state.skillsReport;
   const allSkills = report?.skills ?? [];
+  // 1. 过滤被阻止的 skill（blockedByAllowlist 或 eligible === false）
+  const visibleSkills = allSkills.filter((s: SkillStatusEntry) => s.eligible !== false);
   const filter = ((state as any).skillsFilter ?? "").trim().toLowerCase();
   const filtered = filter
-    ? allSkills.filter((s: SkillStatusEntry) =>
+    ? visibleSkills.filter((s: SkillStatusEntry) =>
         [s.name, s.description, s.source].join(" ").toLowerCase().includes(filter),
       )
-    : allSkills;
+    : visibleSkills;
   const groups = groupLocalSkills(filtered);
   const busy = state.skillsBusyKey;
   const messages = state.skillMessages as SkillMessageMap;
@@ -502,30 +1359,28 @@ function renderInstalledSkillsView(state: AppViewState) {
                     <div class="skill-store__card-name">${skill.name ?? key}</div>
                     <div class="skill-store__card-meta">
                       <span class="skills-badge">${skill.source}</span>
-                      <span class="skills-badge ${skill.eligible ? "skills-badge--ok" : "skills-badge--warn"}">
-                        ${skill.eligible ? t("skills.eligible") : t("skills.blocked")}
-                      </span>
-                      ${skill.disabled
-                        ? html`<span class="skills-badge skills-badge--warn">${t("skills.disabled")}</span>`
-                        : nothing}
                     </div>
                   </div>
                   <div class="skill-store__card-action">
-                    <button
-                      class="skill-store__btn ${skill.disabled ? "skill-store__btn--install" : "skill-store__btn--installed"}"
-                      type="button"
-                      ?disabled=${isBusy}
-                      @click=${() => void updateSkillEnabled(state as unknown as SkillsState, key, !!skill.disabled)}
-                    >${skill.disabled ? t("skills.enable") : t("skills.disable")}</button>
                     ${skill.source !== "openclaw-bundled"
                       ? html`
                         <button
-                          class="skill-store__btn skill-store__btn--installed"
+                          class="skill-card__uninstall"
                           type="button"
+                          title="${t("skillStore.uninstall")}"
                           ?disabled=${isBusy}
                           @click=${() => void uninstallLocalSkill(state, skill.name ?? key)}
-                        >${t("skillStore.uninstall")}</button>`
+                        ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button>`
                       : nothing}
+                    <label class="skill-toggle-switch">
+                      <input
+                        type="checkbox"
+                        .checked=${!skill.disabled}
+                        ?disabled=${isBusy}
+                        @change=${() => void updateSkillEnabled(state as unknown as SkillsState, key, !!skill.disabled)}
+                      />
+                      <span class="skill-toggle-slider"></span>
+                    </label>
                   </div>
                 </div>
                 <div class="skill-store__card-desc">${clamp(skill.description as string, 160)}</div>
@@ -574,6 +1429,12 @@ function openSkillsView(state: AppViewState, subTab: "installed" | "store" = "in
   }
 }
 
+// 打开工作区文件浏览视图
+function openWorkspaceView(state: AppViewState) {
+  setOneClawView(state, "workspace");
+  void initWorkspace(state);
+}
+
 // 新建会话：同步写入本地列表后再切换，异步同步到 Gateway 供跨终端访问
 function createNewSession(state: AppViewState) {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -587,8 +1448,10 @@ function createNewSession(state: AppViewState) {
     sessions: [{ key: newKey, label, updatedAt: Date.now() }, ...sessions],
   };
   applySessionKey(state, newKey, true);
-  // 注意：此时 Gateway 尚无此会话（无消息），sessions.patch 不会生效。
-  // label 持久化在首条消息发送后由 autoRenameOnFirstMessage (app-chat.ts) 完成。
+  // 新建会话时重置模型选择为默认
+  state.resetModelToDefault();
+  // 标记为待自动命名。label 将在首条消息发送 + chat.event final 后持久化到 gateway。
+  pendingSessionLabels.set(newKey, label);
 }
 
 function confirmAndCreateNewSession(state: AppViewState) {
@@ -602,16 +1465,6 @@ function confirmAndCreateNewSession(state: AppViewState) {
 
 async function handleRefreshChat(state: AppViewState) {
   if (state.chatLoading) return;
-  // 断开连接时立即重连，3 秒后仍失败则弹窗询问是否重启 Gateway
-  if (!state.connected) {
-    (state as any).client?.reconnectNow();
-    setTimeout(() => {
-      if (!state.connected) {
-        state.showRestartGatewayDialog = true;
-      }
-    }, 3000);
-    return;
-  }
   const app = state as any;
   app.chatManualRefreshInFlight = true;
   app.chatNewMessagesBelow = false;
@@ -628,6 +1481,16 @@ async function handleRefreshChat(state: AppViewState) {
       app.chatNewMessagesBelow = false;
     });
   }
+}
+
+// 断开连接时尝试重连，3 秒后仍失败则弹窗询问是否重启 Gateway
+function handleReconnect(state: AppViewState) {
+  (state as any).client?.reconnectNow();
+  setTimeout(() => {
+    if (!state.connected) {
+      state.showRestartGatewayDialog = true;
+    }
+  }, 3000);
 }
 
 async function handleOpenWebUI(state: AppViewState) {
@@ -659,150 +1522,33 @@ async function handleApplyUpdate(state: AppViewState) {
   }
 }
 
-function ensureSettingsEmbedBridge(state: AppViewState) {
-  const bridgeKey = "__oneclawSettingsEmbedBridge";
-  const w = window as unknown as {
-    [bridgeKey]?: { state: AppViewState; bound: boolean };
-  };
-  if (!w[bridgeKey]) {
-    w[bridgeKey] = { state, bound: false };
-  } else {
-    w[bridgeKey]!.state = state;
-  }
-  if (w[bridgeKey]!.bound) {
-    return;
-  }
+// Settings iframe bridge + renderer removed: Settings is now a native Lit component (renderSettingsView)
 
-  window.addEventListener("message", (event: MessageEvent) => {
-    const bridge = (window as unknown as { [bridgeKey]?: { state: AppViewState } })[bridgeKey];
-    if (!bridge) {
-      return;
-    }
-    const data = event.data as
-      | {
-          source?: string;
-          type?: string;
-          payload?: { theme?: "system" | "light" | "dark"; showThinking?: boolean };
-        }
-      | undefined;
-    if (!data || data.source !== "oneclaw-settings-embed") {
-      return;
-    }
-
-    if (data.type === "appearance-request-init") {
-      if (event.source && "postMessage" in event.source) {
-        (event.source as Window).postMessage(
-          {
-            source: "oneclaw-chat-ui",
-            type: "appearance-init",
-            payload: {
-              theme: bridge.state.theme,
-              showThinking: bridge.state.settings.chatShowThinking,
-            },
-          },
-          "*",
-        );
-      }
-      return;
-    }
-
-    if (data.type === "navigate-back") {
-      setOneClawView(bridge.state, "chat");
-      return;
-    }
-
-    if (data.type === "appearance-save") {
-      const nextTheme = data.payload?.theme;
-      const nextShowThinking = data.payload?.showThinking;
-      if (nextTheme === "system" || nextTheme === "light" || nextTheme === "dark") {
-        bridge.state.setTheme(nextTheme);
-      }
-      if (typeof nextShowThinking === "boolean") {
-        bridge.state.applySettings({
-          ...bridge.state.settings,
-          chatShowThinking: nextShowThinking,
-        });
-      }
-    }
-  });
-
-  w[bridgeKey]!.bound = true;
+// 文件拖拽/粘贴事件桥接
+let fileDropBound = false;
+function ensureFileDropBridge(state: AppViewState) {
+  if (fileDropBound) return;
+  fileDropBound = true;
+  let latestState = state;
+  // 更新引用以便事件回调能访问最新的 state
+  (window as any).__oneclawFileDropState = { update: (s: AppViewState) => { latestState = s; } };
+  window.addEventListener("oneclaw:file-drop", ((e: CustomEvent<{ paths: string[] }>) => {
+    const current = latestState.chatAttachments ?? [];
+    const additions = e.detail.paths.map((p: string) => ({
+      id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      filePath: p,
+      name: p.split(/[/\\]/).pop() || p,
+    }));
+    latestState.chatAttachments = [...current, ...additions];
+  }) as EventListener);
 }
-
-function resolveEmbeddedSettingsUrl(state: AppViewState) {
-  const lang = getLocale();
-  const baseUrl = new URL(window.location.href);
-  const settingsUrl = new URL("../../settings/index.html", baseUrl);
-  settingsUrl.searchParams.set("lang", lang);
-  settingsUrl.searchParams.set("embedded", "1");
-  settingsUrl.searchParams.set("theme", state.theme);
-  settingsUrl.searchParams.set(
-    "showThinking",
-    state.settings.chatShowThinking ? "1" : "0",
-  );
-  if (state.settingsTabHint) {
-    settingsUrl.searchParams.set("tab", state.settingsTabHint);
-  }
-  return settingsUrl.toString();
-}
-
-function renderOneClawSettingsPage(state: AppViewState) {
-  ensureSettingsEmbedBridge(state);
-  const settingsUrl = resolveEmbeddedSettingsUrl(state);
-  return html`
-    <section class="oneclaw-settings-host">
-      <iframe
-        class="oneclaw-settings-iframe"
-        src=${settingsUrl}
-        title=${t("settings.title")}
-      ></iframe>
-    </section>
-  `;
-}
-
-// 在聊天页顶部展示待审批卡片，把“去设置里找批准”改成主流程内的一步动作。
-function renderPairingNotice(state: AppViewState) {
-  if (!state.shouldShowPairingNotice()) {
-    return nothing;
-  }
-  const first = state.pairingState.requests[0];
-  const peerLabel = first?.name?.trim() || first?.id?.trim() || t("pairing.pendingUnknown");
-  const channelLabel = state.getPendingPairingChannelLabel();
-  return html`
-    <section class="oneclaw-pairing-notice">
-      <div class="oneclaw-pairing-notice__main">
-        <div class="oneclaw-pairing-notice__title">${t("pairing.pendingTitle").replace("{channel}", channelLabel)}</div>
-        <div class="oneclaw-pairing-notice__desc">
-          ${t("pairing.pendingDesc").replace("{name}", peerLabel)}
-        </div>
-      </div>
-      <div class="oneclaw-pairing-notice__actions">
-        <button
-          class="oneclaw-pairing-notice__icon-btn is-approve"
-          type="button"
-          ?disabled=${state.pairingApproving || state.pairingRejecting}
-          title=${t("pairing.approveNow")}
-          aria-label=${t("pairing.approveNow")}
-          @click=${() => void state.approveFirstPairing()}
-        >
-          ${icons.check}
-        </button>
-        <button
-          class="oneclaw-pairing-notice__icon-btn is-reject"
-          type="button"
-          ?disabled=${state.pairingApproving || state.pairingRejecting}
-          title=${t("pairing.rejectNow")}
-          aria-label=${t("pairing.rejectNow")}
-          @click=${() => void state.rejectFirstPairing()}
-        >
-          ${icons.x}
-        </button>
-      </div>
-    </section>
-  `;
+function updateFileDropState(state: AppViewState) {
+  (window as any).__oneclawFileDropState?.update(state);
 }
 
 export function renderApp(state: AppViewState) {
+  ensureFileDropBridge(state);
+  updateFileDropState(state);
   const chatDisabledReason = state.connected ? null : t("error.disconnected");
   const showThinking = state.onboarding ? false : state.settings.chatShowThinking;
   const assistantAvatarUrl = resolveAssistantAvatarUrl(state);
@@ -812,27 +1558,45 @@ export function renderApp(state: AppViewState) {
   const currentSessionKey = state.sessionKey;
   const sessionOptions = resolveSessionOptions(state);
   const oneclawView = state.settings.oneclawView ?? "chat";
+  const setupActive = oneclawView === "setup";
   const settingsActive = oneclawView === "settings";
   const skillsActive = oneclawView === "skills";
+  const workspaceActive = oneclawView === "workspace";
+  const cronActive = oneclawView === "cron";
+  const feedbackActive = oneclawView === "feedback";
   const updateBannerState = state.updateBannerState;
 
   return html`
     <div
-      class="oneclaw-shell ${navigator.platform?.includes("Mac") ? "is-mac" : ""} ${chatFocus ? "oneclaw-shell--focus" : ""} ${sidebarCollapsed ? "oneclaw-shell--sidebar-collapsed" : ""} ${settingsActive ? "oneclaw-shell--fullpage" : ""}"
+      class="oneclaw-shell ${navigator.platform?.includes("Mac") ? "is-mac" : ""} ${navigator.platform?.includes("Win") ? "is-win" : ""} ${chatFocus ? "oneclaw-shell--focus" : ""} ${sidebarCollapsed ? "oneclaw-shell--sidebar-collapsed" : ""} ${setupActive || settingsActive || skillsActive || workspaceActive || cronActive || feedbackActive ? "oneclaw-shell--fullpage" : ""}"
     >
-      ${chatFocus || sidebarCollapsed
+      ${chatFocus || sidebarCollapsed || setupActive || settingsActive || skillsActive || workspaceActive || cronActive || feedbackActive
         ? nothing
         : renderSidebar({
             connected: state.connected,
             currentSessionKey,
+            mainSessionKey: resolveMainSessionKey(state.hello, state.sessionsResult),
             sessionOptions,
             settingsActive,
             skillsActive,
+            workspaceActive,
+            cronActive,
+            cronJobCount: state.cronJobs.filter((j) => !isExpiredOneShot(j)).length,
+            onOpenCron: () => setOneClawView(state, "cron"),
+            feedbackActive,
+            // 全局红点派生自当前会话内的未读 thread 集合；点开 thread 自动清除
+            feedbackHasReply: feedbackPanelState.unreadThreadIds.length > 0,
+            onOpenFeedback: () => openFeedbackView(state),
             updateStatus: updateBannerState.status,
             updateVersion: updateBannerState.version,
             updatePercent: updateBannerState.percent,
             updateShowBadge: updateBannerState.showBadge,
-            refreshDisabled: state.chatLoading,
+            webbridgeRepairVisible: state.webbridgeRepairVisible,
+            webbridgeRepairBrowserName: state.webbridgeRepairBrowserName,
+            webbridgeRepairChecking: state.webbridgeRepairChecking,
+            onWebbridgeRepairClick: () => {
+              void state.onWebbridgeRepairClick();
+            },
             onSelectSession: (nextSessionKey: string) => handleSessionChange(state, nextSessionKey),
             onNewChat: () => createNewSession(state),
             onRenameSession: (key: string, newLabel: string) => {
@@ -841,19 +1605,23 @@ export function renderApp(state: AppViewState) {
             onDeleteSession: (key: string) => {
               void deleteSessionFromSidebar(state, key);
             },
-            onRefresh: () => void handleRefreshChat(state),
+            isDeletingSession: (key: string) => deletingSessionKeys.has(key),
             onToggleSidebar: () => {
               state.applySettings({
                 ...state.settings,
                 navCollapsed: !state.settings.navCollapsed,
               });
             },
-            onOpenSettings: () => openSettingsView(
-              state,
-              state.pairingState.pendingCount > 0 ? "channels" : null,
-            ),
+            settingsBadge: !localStorage.getItem("oneclaw:weixin-badge-seen"),
+            onOpenSettings: () => {
+              localStorage.setItem("oneclaw:weixin-badge-seen", "1");
+              openSettingsView(state, null);
+            },
             onOpenSkillStore: () => openSkillsView(state),
+            onOpenWorkspace: () => openWorkspaceView(state),
             onOpenWebUI: () => void handleOpenWebUI(state),
+            errors: [chatDisabledReason, state.lastError].filter(Boolean) as string[],
+            onReconnect: () => handleReconnect(state),
             onOpenDocs: () => {
               if (window.oneclaw?.openExternal) {
                 window.oneclaw.openExternal("https://oneclaw.cn/docs");
@@ -865,50 +1633,70 @@ export function renderApp(state: AppViewState) {
           })}
 
       <div class="oneclaw-main">
-        ${
-          settingsActive
-            ? html`<div style="position: absolute; top: 0; left: 0; right: 0; height: 44px; -webkit-app-region: drag;"></div>`
-            : html`
-                <div class="oneclaw-titlebar">
-                  ${
-                    sidebarCollapsed && !chatFocus
-                      ? html`
-                          <div class="oneclaw-floating-actions">
-                            <button
-                              class="oneclaw-floating-btn"
-                              type="button"
-                              @click=${() => {
-                                state.applySettings({
-                                  ...state.settings,
-                                  navCollapsed: false,
-                                });
-                              }}
-                              title=${t("sidebar.expand")}
-                              aria-label=${t("sidebar.expand")}
-                            >
-                              ${icons.panelLeft}
-                            </button>
-                            <button
-                              class="oneclaw-floating-btn"
-                              type="button"
-                              @click=${() => handleSessionChange(state, generateSessionKey())}
-                              title=${t("sidebar.newChat")}
-                              aria-label=${t("sidebar.newChat")}
-                            >
-                              ${icons.messagePlus}
-                            </button>
-                          </div>
-                        `
-                      : nothing
-                  }
-                </div>
-              `
-        }
+        <div class="oneclaw-titlebar">
+          ${
+            setupActive
+              ? nothing
+              : settingsActive || skillsActive || workspaceActive || cronActive || feedbackActive
+              ? html`
+                  <div class="oneclaw-floating-actions">
+                    <button
+                      class="oneclaw-floating-btn"
+                      type="button"
+                      @click=${() => setOneClawView(state, "chat")}
+                      data-tooltip=${t("sidebar.backToChat")}
+                      data-tooltip-pos="bottom"
+                      aria-label=${t("sidebar.backToChat")}
+                    >
+                      ${icons.arrowLeft}
+                    </button>
+                  </div>
+                `
+              : sidebarCollapsed && !chatFocus
+                ? html`
+                    <div class="oneclaw-floating-actions">
+                      <button
+                        class="oneclaw-floating-btn"
+                        type="button"
+                        @click=${() => {
+                          state.applySettings({
+                            ...state.settings,
+                            navCollapsed: false,
+                          });
+                        }}
+                        data-tooltip=${t("sidebar.expand")}
+                        data-tooltip-pos="bottom"
+                        aria-label=${t("sidebar.expand")}
+                      >
+                        ${icons.panelLeft}
+                      </button>
+                      <button
+                        class="oneclaw-floating-btn"
+                        type="button"
+                        @click=${() => handleSessionChange(state, generateSessionKey())}
+                        data-tooltip=${t("sidebar.newChat")}
+                        data-tooltip-pos="bottom"
+                        aria-label=${t("sidebar.newChat")}
+                      >
+                        ${icons.messagePlus}
+                      </button>
+                    </div>
+                  `
+                : nothing
+          }
+          <div class="oneclaw-titlebar-right">
+            ${renderFeedbackButton(
+              () => openFeedbackView(state),
+              feedbackPanelState.unreadThreadIds.length > 0,
+            )}
+          </div>
+        </div>
 
         <main class="oneclaw-content">
-          ${renderPairingNotice(state)}
-          ${settingsActive
-            ? renderOneClawSettingsPage(state)
+          ${setupActive
+            ? renderSetupView(state)
+            : settingsActive
+            ? renderSettingsView(state)
             : skillsActive
               ? html`
                   <div class="skills-scroll" @scroll=${(e: Event) => {
@@ -989,7 +1777,7 @@ export function renderApp(state: AppViewState) {
                                       (state.renderRoot?.querySelector(".skill-store__search-input") as HTMLInputElement)?.focus();
                                     });
                                   }}
-                                  title="${t("skillStore.search")}"
+                                  data-tooltip="${t("skillStore.search")}"
                                 ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
                               `
                           }
@@ -1039,7 +1827,126 @@ export function renderApp(state: AppViewState) {
                     </section>
                   </div>
                 `
-              : html`
+              : workspaceActive
+                ? renderWorkspaceView(state, () => setOneClawView(state, "chat"))
+              : cronActive
+                ? renderCronManage({
+                    jobs: state.cronJobs,
+                    loading: state.cronLoading,
+                    error: state.cronError,
+                    expandedJobId: cronExpandedJobId,
+                    runs: state.cronRuns,
+                    runsLoading: cronRunsLoading,
+                    busy: state.cronBusy,
+                    showForm: cronShowForm,
+                    editingJobId: cronEditingJobId,
+                    form: state.cronForm,
+                    channelMeta: state.channelsSnapshot?.channelMeta ?? [],
+                    onToggleExpand: (jobId: string) => {
+                      cronExpandedJobId = jobId;
+                      cronShowForm = false;
+                      cronRunsLoading = true;
+                      state.requestUpdate();
+                      void loadCronRuns(state as any, jobId).finally(() => {
+                        cronRunsLoading = false;
+                        state.requestUpdate();
+                      });
+                    },
+                    onNavigateToSession: (sessionKey: string) => {
+                      setOneClawView(state, "chat");
+                      state.applySettings({
+                        ...state.settings,
+                        sessionKey,
+                        oneclawView: "chat",
+                      });
+                    },
+                    onRemove: (jobId: string) => {
+                      const job = state.cronJobs.find((j) => j.id === jobId);
+                      if (job) {
+                        void removeCronJob(state as any, job).then(() => state.requestUpdate());
+                      }
+                    },
+                    onToggle: (jobId: string, enabled: boolean) => {
+                      const job = state.cronJobs.find((j) => j.id === jobId);
+                      if (job) {
+                        void toggleCronJob(state as any, job, enabled).then(() => state.requestUpdate());
+                      }
+                    },
+                    onRun: (jobId: string) => {
+                      const job = state.cronJobs.find((j) => j.id === jobId);
+                      if (job) {
+                        void runCronJob(state as any, job).then(() => state.requestUpdate());
+                      }
+                    },
+                    onToggleForm: () => {
+                      cronShowForm = !cronShowForm;
+                      cronEditingJobId = null;
+                      if (cronShowForm) {
+                        cronExpandedJobId = null;
+                        state.cronForm = { ...DEFAULT_CRON_FORM };
+                      }
+                      state.requestUpdate();
+                    },
+                    onFormChange: (patch) => {
+                      state.cronForm = { ...state.cronForm, ...patch };
+                      state.requestUpdate();
+                    },
+                    onAddJob: () => {
+                      if (cronEditingJobId) {
+                        void updateCronJob(state as any, cronEditingJobId).then(() => {
+                          if (!state.cronError) {
+                            cronShowForm = false;
+                            cronEditingJobId = null;
+                          }
+                          state.requestUpdate();
+                        });
+                      } else {
+                        void addCronJob(state as any).then(() => {
+                          if (!state.cronError) {
+                            cronShowForm = false;
+                          }
+                          state.requestUpdate();
+                        });
+                      }
+                    },
+                    onEdit: (jobId: string) => {
+                      const job = state.cronJobs.find((j) => j.id === jobId);
+                      if (!job) return;
+                      cronEditingJobId = jobId;
+                      cronShowForm = true;
+                      cronExpandedJobId = null;
+                      // Detect daily pattern: "M H * * *" → convert to daily mode
+                      let editKind: string = job.schedule.kind;
+                      let editCronExpr = job.schedule.expr ?? "0 7 * * *";
+                      if (job.schedule.kind === "cron" && job.schedule.expr) {
+                        const dm = job.schedule.expr.match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/);
+                        if (dm) {
+                          editKind = "daily";
+                          editCronExpr = `${dm[2].padStart(2, "0")}:${dm[1].padStart(2, "0")}`;
+                        }
+                      }
+                      state.cronForm = {
+                        ...DEFAULT_CRON_FORM,
+                        name: job.name ?? "",
+                        scheduleKind: editKind as any,
+                        scheduleAt: job.schedule.at ?? "",
+                        everyAmount: job.schedule.everyMs ? String(Math.round(job.schedule.everyMs / 60000)) : "30",
+                        everyUnit: "minutes",
+                        cronExpr: editCronExpr,
+                        cronTz: job.schedule.tz ?? "",
+                        payloadKind: job.payload.kind,
+                        payloadText: job.payload.message ?? job.payload.text ?? "",
+                        sessionTarget: (job as any).sessionTarget ?? "isolated",
+                        deliveryMode: job.delivery?.mode ?? "announce",
+                        deliveryChannel: job.delivery?.channel ?? "last",
+                        deliveryTo: job.delivery?.to ?? "",
+                      };
+                      state.requestUpdate();
+                    },
+                  })
+                : feedbackActive
+                  ? renderFeedbackPanel(feedbackPanelState, buildFeedbackPanelCallbacks(state))
+                : html`
                 ${renderChat({
                   sessionKey: state.sessionKey,
                   onSessionKeyChange: (next) => applySessionKey(state, next),
@@ -1050,6 +1957,7 @@ export function renderApp(state: AppViewState) {
                   compactionStatus: state.compactionStatus,
                   assistantAvatarUrl: chatAvatarUrl,
                   messages: state.chatMessages,
+                  visibleHistoryCount: (state as any).chatVisibleMessageCount,
                   toolMessages: state.chatToolMessages,
                   stream: state.chatStream,
                   streamStartedAt: (state as any).chatStreamStartedAt,
@@ -1057,7 +1965,7 @@ export function renderApp(state: AppViewState) {
                   queue: state.chatQueue,
                   connected: state.connected,
                   canSend: state.connected,
-                  disabledReason: chatDisabledReason,
+                  disabledReason: null,
                   error: state.lastError,
                   sessions: state.sessionsResult,
                   focusMode: false,
@@ -1068,6 +1976,15 @@ export function renderApp(state: AppViewState) {
                   onToggleFocusMode: () => {},
                   onChatScroll: (event) => state.handleChatScroll(event),
                   onDraftChange: (next) => (state.chatMessage = next),
+                  configuredModels: state.configuredModels,
+                  currentModel: state.currentModel,
+                  dirtyMeterSessions: state.dirtyMeterSessions,
+                  onModelChange: (modelKey) => state.handleModelChange(modelKey),
+                  thinkingToggleLevel: state.thinkingLevel,
+                  thinkingToggleLevels: state.thinkingLevels,
+                  isBinaryThinking: state.isBinaryThinking,
+                  onThinkingToggle: () => state.handleThinkingToggle(),
+                  onThinkingLevelChange: (level: string) => state.handleThinkingLevelChange(level),
                   attachments: state.chatAttachments,
                   onAttachmentsChange: (next) => (state.chatAttachments = next),
                   onSend: () => state.handleSendChat(),
@@ -1075,7 +1992,7 @@ export function renderApp(state: AppViewState) {
                   onAbort: () => void state.handleAbortChat(),
                   onQueueRemove: (id) => state.removeQueuedMessage(id),
                   onNewSession: () => confirmAndCreateNewSession(state),
-                  showNewMessages: state.chatNewMessagesBelow && !state.chatManualRefreshInFlight,
+                  showNewMessages: !state.chatUserNearBottom,
                   onScrollToBottom: () => state.scrollToBottom(),
                   sidebarOpen: state.sidebarOpen,
                   sidebarContent: state.sidebarContent,
@@ -1095,6 +2012,98 @@ export function renderApp(state: AppViewState) {
       ${renderGatewayUrlConfirmation(state)}
       ${renderRestartGatewayDialog(state)}
       ${renderSharePrompt(state)}
+      ${renderReleaseNotesModal(state)}
+      ${renderWebbridgePillModal(state)}
+      ${renderFeedbackDialog(feedbackState, {
+        onClose: () => {
+          feedbackState = createFeedbackDialogState();
+          state.requestUpdate();
+        },
+        onSubmit: async () => {
+          feedbackState = { ...feedbackState, submitting: true, error: null };
+          state.requestUpdate();
+          try {
+            const result = await window.oneclaw?.submitFeedback?.({
+              content: feedbackState.content,
+              screenshots: feedbackState.screenshots,
+              includeLogs: feedbackState.includeLogs,
+            });
+            if (result?.ok) {
+              feedbackState = createFeedbackDialogState();
+              // 通用 toast 提示反馈提交成功
+              showToast(state, t("feedback.success"));
+            } else {
+              feedbackState = { ...feedbackState, submitting: false, error: result?.error || t("feedback.error") };
+            }
+          } catch {
+            feedbackState = { ...feedbackState, submitting: false, error: t("feedback.error") };
+          }
+          state.requestUpdate();
+        },
+        onContentChange: (value) => {
+          feedbackState = { ...feedbackState, content: value };
+          state.requestUpdate();
+        },
+        onToggleLogs: (checked) => {
+          feedbackState = { ...feedbackState, includeLogs: checked };
+          state.requestUpdate();
+        },
+        onAddScreenshots: (files) => {
+          // 读取文件为 base64
+          Array.from(files).forEach((file) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const dataUrl = reader.result as string;
+              const base64 = dataUrl.split(",")[1];
+              feedbackState = {
+                ...feedbackState,
+                screenshots: [...feedbackState.screenshots, base64],
+                screenshotPreviews: [...feedbackState.screenshotPreviews, dataUrl],
+              };
+              state.requestUpdate();
+            };
+            reader.readAsDataURL(file);
+          });
+        },
+        onRemoveScreenshot: (index) => {
+          feedbackState = {
+            ...feedbackState,
+            screenshots: feedbackState.screenshots.filter((_, i) => i !== index),
+            screenshotPreviews: feedbackState.screenshotPreviews.filter((_, i) => i !== index),
+          };
+          state.requestUpdate();
+        },
+        onPaste: (e) => {
+          const items = e.clipboardData?.items;
+          if (!items) return;
+          for (const item of Array.from(items)) {
+            if (item.type.startsWith("image/")) {
+              e.preventDefault();
+              const file = item.getAsFile();
+              if (!file) continue;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = reader.result as string;
+                const base64 = dataUrl.split(",")[1];
+                feedbackState = {
+                  ...feedbackState,
+                  screenshots: [...feedbackState.screenshots, base64],
+                  screenshotPreviews: [...feedbackState.screenshotPreviews, dataUrl],
+                };
+                state.requestUpdate();
+              };
+              reader.readAsDataURL(file);
+            }
+          }
+        },
+        onPreviewScreenshot: (src) => {
+          feedbackState = { ...feedbackState, previewSrc: src };
+          state.requestUpdate();
+        },
+      })}
+      ${skillStoreState.toastMessage
+        ? html`<div class="global-toast">${skillStoreState.toastMessage}</div>`
+        : nothing}
     </div>
   `;
 }

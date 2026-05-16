@@ -20,11 +20,15 @@ import {
 
 type LifecycleHost = {
   basePath: string;
+  settings: {
+    oneclawView?: string;
+  };
   tab: Tab;
   chatHasAutoScrolled: boolean;
   chatManualRefreshInFlight: boolean;
   chatLoading: boolean;
   chatMessages: unknown[];
+  chatVisibleMessageCount: number;
   chatToolMessages: unknown[];
   chatStream: string;
   logsAutoFollow: boolean;
@@ -41,14 +45,26 @@ export function handleConnected(host: LifecycleHost) {
   syncThemeWithSettings(host as unknown as Parameters<typeof syncThemeWithSettings>[0]);
   attachThemeListener(host as unknown as Parameters<typeof attachThemeListener>[0]);
   window.addEventListener("popstate", host.popStateHandler);
-  connectGateway(host as unknown as Parameters<typeof connectGateway>[0]);
-  startNodesPolling(host as unknown as Parameters<typeof startNodesPolling>[0]);
+
+  // Setup 首屏由启动 URL 直接决定；只要当前还是 setup，就绝不能抢先连 gateway。
+  if (host.settings.oneclawView !== "setup") {
+    connectGateway(host as unknown as Parameters<typeof connectGateway>[0]);
+    startNodesPolling(host as unknown as Parameters<typeof startNodesPolling>[0]);
+  }
   if (host.tab === "logs") {
     startLogsPolling(host as unknown as Parameters<typeof startLogsPolling>[0]);
   }
   if (host.tab === "debug") {
     startDebugPolling(host as unknown as Parameters<typeof startDebugPolling>[0]);
   }
+}
+
+/**
+ * Called when transitioning from setup → chat to start the deferred gateway connection.
+ */
+export function deferredGatewayConnect(host: LifecycleHost) {
+  connectGateway(host as unknown as Parameters<typeof connectGateway>[0]);
+  startNodesPolling(host as unknown as Parameters<typeof startNodesPolling>[0]);
 }
 
 export function handleFirstUpdated(host: LifecycleHost) {
@@ -72,6 +88,7 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
   if (
     host.tab === "chat" &&
     (changed.has("chatMessages") ||
+      changed.has("chatVisibleMessageCount") ||
       changed.has("chatToolMessages") ||
       changed.has("chatStream") ||
       changed.has("chatLoading") ||

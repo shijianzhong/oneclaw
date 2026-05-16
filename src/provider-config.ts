@@ -2,6 +2,7 @@ import * as https from "https";
 import * as http from "http";
 import * as fs from "fs";
 import { resolveUserConfigPath, resolveUserStateDir } from "./constants";
+import { syncOpenClawStateAfterWrite } from "./openclaw-health-state";
 import { backupCurrentUserConfig } from "./config-backup";
 
 // ── Provider 配置预设（与 kimiclaw ProviderSetupView.swift 对齐） ──
@@ -37,35 +38,35 @@ export const CUSTOM_PROVIDER_PRESETS: Record<string, CustomProviderPreset> = {
     baseUrl: "https://api.minimax.io/anthropic",
     api: "anthropic-messages",
     placeholder: "eyJ...",
-    models: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+    models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
   },
   "minimax-cn": {
     providerKey: "minimax-cn",
     baseUrl: "https://api.minimaxi.com/anthropic",
     api: "anthropic-messages",
     placeholder: "eyJ...",
-    models: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+    models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
   },
   "zai-global": {
-    providerKey: "zai",
+    providerKey: "zai-global",
     baseUrl: "https://api.z.ai/api/paas/v4",
     api: "openai-completions",
     placeholder: "...",
-    models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+    models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
   },
   "zai-cn": {
-    providerKey: "zai",
+    providerKey: "zai-cn",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     api: "openai-completions",
     placeholder: "...",
-    models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+    models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
   },
   "zai-cn-coding": {
-    providerKey: "zai",
+    providerKey: "zai-cn-coding",
     baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
     api: "openai-completions",
     placeholder: "...",
-    models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+    models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
   },
   "volcengine": {
     providerKey: "volcengine",
@@ -75,25 +76,25 @@ export const CUSTOM_PROVIDER_PRESETS: Record<string, CustomProviderPreset> = {
     models: ["doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-2.0-code", "doubao-seed-code"],
   },
   "volcengine-coding": {
-    providerKey: "volcengine",
+    providerKey: "volcengine-coding",
     baseUrl: "https://ark.cn-beijing.volces.com/api/coding",
-    api: "openai-completions",
+    api: "anthropic-messages",
     placeholder: "...",
-    models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-code", "minimax-m2.5", "glm-4.7", "deepseek-v3.2", "kimi-k2.5", "ark-code-latest"],
+    models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-code", "minimax-m2.7", "glm-5.1", "deepseek-v3.2", "kimi-k2.6", "ark-code-latest"],
   },
   "qwen": {
     providerKey: "qwen",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     api: "openai-completions",
     placeholder: "sk-...",
-    models: ["qwen-coder-plus-latest", "qwen-plus-latest", "qwen-max-latest", "qwen-turbo-latest"],
+    models: ["qwen3.6-max-preview", "qwen3.6-plus", "qwen-coder-plus-latest", "qwen-plus-latest", "qwen-max-latest", "qwen-turbo-latest"],
   },
   "qwen-coding": {
-    providerKey: "qwen",
+    providerKey: "qwen-coding",
     baseUrl: "https://coding.dashscope.aliyuncs.com/v1",
     api: "openai-completions",
     placeholder: "sk-sp-...",
-    models: ["qwen3.5-plus", "kimi-k2.5", "glm-5", "MiniMax-M2.5",],
+    models: ["qwen3.6-plus", "qwen3.5-plus", "kimi-k2.6", "glm-5.1", "MiniMax-M2.7"],
   },
   "deepseek": {
     providerKey: "deepseek",
@@ -103,6 +104,21 @@ export const CUSTOM_PROVIDER_PRESETS: Record<string, CustomProviderPreset> = {
     models: ["deepseek-chat", "deepseek-reasoner"],
   },
 };
+
+// 手动 custom provider：从 baseURL 确定性派生唯一 configKey
+// 同一 URL 永远产生同一 key，不同 URL 产生不同 key
+export function deriveCustomConfigKey(baseURL: string): string {
+  try {
+    const u = new URL(baseURL);
+    const slug = (u.host + u.pathname)
+      .replace(/\/+$/, "")
+      .replace(/[^a-zA-Z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    return slug ? `custom-${slug}` : "custom";
+  } catch {
+    return "custom";
+  }
+}
 
 // ── 构建 Provider 配置对象 ──
 
@@ -164,7 +180,7 @@ export function saveMoonshotConfig(
     apiKey,
     baseUrl: sub.baseUrl,
     api: sub.api,
-    models: [{ id: modelID, name: modelID, input: ["text", "image"] }],
+    models: [{ id: modelID, name: modelID, input: ["text", "image"], reasoning: true }],
   };
 
   config.agents.defaults.model.primary = `${providerKey}/${modelID}`;
@@ -189,6 +205,10 @@ export function writeUserConfig(config: any): void {
   backupCurrentUserConfig();
   const configPath = resolveUserConfigPath();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+  // openclaw 4.x 每次读 openclaw.json 会与 health-state baseline 以及
+  // openclaw.json.bak 做字节校验；外部直写会让两者落后，产生 .clobbered 雪崩。
+  // 这里把 .bak 同步成当前内容，并清理 health entry 让 openclaw 重建基线。
+  syncOpenClawStateAfterWrite(configPath);
 }
 
 // ── 验证函数 ──
@@ -225,30 +245,26 @@ export function verifyGoogle(apiKey: string): Promise<void> {
   );
 }
 
-// Moonshot 子平台验证（根据子平台选择不同 URL）
-export function verifyMoonshot(apiKey: string, subPlatform?: string, modelID?: string): Promise<void> {
+// Kimi Code 验证：始终通过本地 auth proxy（proxy 自动注入 OAuth token）
+export function verifyKFC(proxyPort: number, modelID?: string): Promise<void> {
+  return jsonRequest(`http://127.0.0.1:${proxyPort}/coding/v1/messages`, {
+    method: "POST",
+    headers: {
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: modelID || "kimi-for-coding",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+}
+
+// Moonshot 子平台验证（moonshot-cn / moonshot-ai）
+export function verifyMoonshot(apiKey: string, subPlatform?: string): Promise<void> {
   const sub = MOONSHOT_SUB_PLATFORMS[subPlatform || "moonshot-cn"];
-  const baseUrl = sub.baseUrl;
-
-  // Kimi Code 使用 Anthropic Messages 协议验证
-  if (subPlatform === "kimi-code") {
-    return jsonRequest(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: modelID || "k2p5",
-        max_tokens: 1,
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    });
-  }
-
-  // moonshot-cn / moonshot-ai 使用 OpenAI 兼容 /models 接口
-  return jsonRequest(`${baseUrl}/models`, {
+  return jsonRequest(`${sub.baseUrl}/models`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
 }
@@ -435,6 +451,7 @@ export async function verifyProvider(params: {
   appSecret?: string;
   clientSecret?: string;
   customPreset?: string;
+  proxyPort?: number;
 }): Promise<{ success: boolean; message?: string }> {
   const {
     provider,
@@ -448,6 +465,7 @@ export async function verifyProvider(params: {
     appSecret,
     clientSecret,
     customPreset,
+    proxyPort,
   } = params;
   try {
     switch (provider) {
@@ -461,7 +479,12 @@ export async function verifyProvider(params: {
         await verifyGoogle(apiKey!);
         break;
       case "moonshot":
-        await verifyMoonshot(apiKey!, subPlatform, modelID);
+        if (subPlatform === "kimi-code") {
+          if (!proxyPort || proxyPort <= 0) throw new Error("Kimi Code auth proxy not running");
+          await verifyKFC(proxyPort, modelID);
+        } else {
+          await verifyMoonshot(apiKey!, subPlatform);
+        }
         break;
       case "custom": {
         const customPre = customPreset ? CUSTOM_PROVIDER_PRESETS[customPreset] : undefined;
@@ -495,6 +518,32 @@ export async function verifyProvider(params: {
 const UA_ANTHROPIC = "Anthropic/JS 0.73.0";
 const UA_OPENAI = "OpenAI/JS 6.10.0";
 
+// 从 provider 响应体中尽力抽出可读的错误消息，避免把 JSON 转义（如 >）泄漏给用户。
+// 兼容常见 provider 形态：anthropic/openai 的 {error:{message}}、moonshot 的 {error:{message}}、
+// 部分代理网关返回 {message} / {msg}、上游字符串 {error:"text"} 等。
+function extractProviderErrorMessage(rawBody: string): string {
+  const trimmed = rawBody.trim();
+  if (!trimmed) return "";
+  try {
+    const json = JSON.parse(trimmed);
+    const candidates: unknown[] = [
+      json?.error?.message,
+      json?.error?.error?.message,
+      json?.error?.msg,
+      json?.error,
+      json?.message,
+      json?.msg,
+      json?.detail,
+    ];
+    for (const c of candidates) {
+      if (typeof c === "string" && c.trim()) return c.trim();
+    }
+  } catch {
+    // body 不是合法 JSON（HTML 错误页 / 纯文本 / 截断），按原文处理
+  }
+  return trimmed;
+}
+
 export function jsonRequest(
   url: string,
   opts: { method?: string; headers?: Record<string, string>; body?: string }
@@ -522,7 +571,10 @@ export function jsonRequest(
           } else if (code === 401 || code === 403) {
             reject(new Error(`API Key 无效 (${code})`));
           } else {
-            reject(new Error(`请求失败 (${code}): ${body.slice(0, 200)}`));
+            // 真实错误文本（已 JSON 解码），上限 1000 字以兼容罕见的极长 message。
+            const text = extractProviderErrorMessage(body);
+            const trimmed = text.length > 1000 ? `${text.slice(0, 1000)}…` : text;
+            reject(new Error(`请求失败 (${code}): ${trimmed}`));
           }
         });
       }

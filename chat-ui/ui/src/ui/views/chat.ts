@@ -1,9 +1,9 @@
 import { html, nothing } from "lit";
 import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
-import type { SessionsListResult } from "../types.ts";
+import type { GatewaySessionRow, SessionsListResult } from "../types.ts";
 import type { ChatItem, MessageGroup } from "../types/chat-types.ts";
-import type { ChatAttachment, ChatQueueItem } from "../ui-types.ts";
+import type { ChatAttachment, ChatQueueItem, ConfiguredModel } from "../ui-types.ts";
 import {
   renderMessageGroup,
   renderReadingIndicatorGroup,
@@ -14,7 +14,11 @@ import { icons } from "../icons.ts";
 import { t } from "../i18n.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import { renderMarkdownSidebar } from "./markdown-sidebar.ts";
+import { resolveContextMeterStats } from "../context-meter.ts";
 import "../components/resizable-divider.ts";
+import { computeStopButtonVisible } from "./chat-stop-button-gate.ts";
+
+export { computeStopButtonVisible };
 
 export type CompactionIndicatorStatus = {
   active: boolean;
@@ -32,6 +36,7 @@ export type ChatProps = {
   canAbort?: boolean;
   compactionStatus?: CompactionIndicatorStatus | null;
   messages: unknown[];
+  visibleHistoryCount: number;
   toolMessages: unknown[];
   stream: string | null;
   streamStartedAt: number | null;
@@ -52,6 +57,17 @@ export type ChatProps = {
   splitRatio?: number;
   assistantName: string;
   assistantAvatar: string | null;
+  // 模型选择器
+  configuredModels?: ConfiguredModel[];
+  currentModel?: string | null;
+  dirtyMeterSessions?: ReadonlySet<string>;
+  onModelChange?: (modelKey: string) => void;
+  // 思考开关
+  thinkingToggleLevel?: string;
+  thinkingToggleLevels?: string[];
+  isBinaryThinking?: boolean;
+  onThinkingToggle?: () => void;
+  onThinkingLevelChange?: (level: string) => void;
   // Image attachments
   attachments?: ChatAttachment[];
   onAttachmentsChange?: (attachments: ChatAttachment[]) => void;
@@ -74,9 +90,69 @@ export type ChatProps = {
 
 const COMPACTION_TOAST_DURATION_MS = 5000;
 
-function adjustTextareaHeight(el: HTMLTextAreaElement) {
-  el.style.height = "auto";
-  el.style.height = `${el.scrollHeight}px`;
+// 自适应高度（首次挂载时延迟到下一帧，确保 CSS 已应用）
+function adjustTextareaHeight(el: HTMLTextAreaElement, deferred = false) {
+  const apply = () => {
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  if (deferred) {
+    requestAnimationFrame(apply);
+  } else {
+    apply();
+  }
+}
+
+/**
+ * Context Meter — 放在发送按钮左侧，展示当前对话记忆占用。
+ * 数据源：
+ *   - used = session.totalTokens（最后一次调用的 prompt token 数，gateway 在
+ *            turn 结束后持久化）
+ *   - max  = session.contextTokens（gateway 按调用时用的模型写入的窗口大小）
+ *            缺失时回退到 lookupContextWindow(session.model)，不跨会话信任 currentModel
+ * 仅展示「当前会话」占用比例，跨会话独立；模型未知且 used>0 时整体隐藏。
+ *
+ * 模型切换：用户切完 model 后，该 sessionKey 会被加入 dirtyMeterSessions 集合，
+ * 直到下一轮 usage（totalTokens 单调推进）落库才清除——天然 per-session 独立。
+ */
+function contextMeterText(
+  key: string,
+  values: { percent: string; used: string; max: string },
+) {
+  return t(key)
+    .replace("{percent}", values.percent)
+    .replace("{used}", values.used)
+    .replace("{max}", values.max);
+}
+
+function renderContextMeter(
+  session: GatewaySessionRow | null | undefined,
+  dirtySessions: ReadonlySet<string> | undefined,
+) {
+  if (!session) return nothing;
+  const stats = resolveContextMeterStats(session, dirtySessions);
+  if (!stats) return nothing;
+  const values = {
+    percent: String(stats.percent),
+    used: stats.used.toLocaleString(),
+    max: stats.max.toLocaleString(),
+  };
+  const label = contextMeterText("chat.contextMeterAria", values);
+  const title = contextMeterText("chat.contextMeterHint", values);
+  return html`
+    <div class="chat-compose__ctx-meter" data-tooltip=${title} data-tooltip-wide="true">
+      <div
+        class="chat-compose__ctx-meter-bar"
+        role="progressbar"
+        aria-label=${label}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow=${String(stats.percent)}
+      >
+        <div class="chat-compose__ctx-meter-fill" style=${`width: ${stats.widthPct}%`}></div>
+      </div>
+    </div>
+  `;
 }
 
 function renderCompactionIndicator(status: CompactionIndicatorStatus | null | undefined) {
@@ -113,44 +189,51 @@ function generateAttachmentId(): string {
 }
 
 function handlePaste(e: ClipboardEvent, props: ChatProps) {
+  if (!props.onAttachmentsChange) return;
+
+  // 图片粘贴：走 dataUrl 内嵌
   const items = e.clipboardData?.items;
-  if (!items || !props.onAttachmentsChange) {
-    return;
-  }
-
-  const imageItems: DataTransferItem[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item.type.startsWith("image/")) {
-      imageItems.push(item);
+  if (items) {
+    const imageItems: DataTransferItem[] = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith("image/")) imageItems.push(items[i]);
+    }
+    if (imageItems.length > 0) {
+      e.preventDefault();
+      for (const item of imageItems) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.addEventListener("load", () => {
+          const dataUrl = reader.result as string;
+          const current = props.attachments ?? [];
+          props.onAttachmentsChange?.([...current, {
+            id: generateAttachmentId(), dataUrl, mimeType: file.type,
+          }]);
+        });
+        reader.readAsDataURL(file);
+      }
+      return;
     }
   }
 
-  if (imageItems.length === 0) {
-    return;
-  }
-
+  // 文件粘贴：从剪贴板读取文件路径（Cmd+C / Ctrl+C 复制的文件）
+  // IPC 是异步的，但 preventDefault 必须同步调用——先检查剪贴板是否含文件条目
+  const hasFileItems = items && Array.from({ length: items.length }, (_, i) => items[i])
+    .some((item) => item.kind === "file");
+  if (!hasFileItems) return;
   e.preventDefault();
-
-  for (const item of imageItems) {
-    const file = item.getAsFile();
-    if (!file) {
-      continue;
-    }
-
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      const dataUrl = reader.result as string;
-      const newAttachment: ChatAttachment = {
-        id: generateAttachmentId(),
-        dataUrl,
-        mimeType: file.type,
-      };
-      const current = props.attachments ?? [];
-      props.onAttachmentsChange?.([...current, newAttachment]);
-    });
-    reader.readAsDataURL(file);
-  }
+  const w = window as Record<string, unknown>;
+  const oneclaw = w.oneclaw as Record<string, (...args: unknown[]) => Promise<string[]>> | undefined;
+  if (!oneclaw?.readClipboardFilePaths) return;
+  oneclaw.readClipboardFilePaths().then((paths: string[]) => {
+    if (!paths?.length) return;
+    const current = props.attachments ?? [];
+    const additions = paths.map((p: string) => ({
+      id: generateAttachmentId(), filePath: p, name: basename(p),
+    }));
+    props.onAttachmentsChange?.([...current, ...additions]);
+  });
 }
 
 // 从路径提取文件名
@@ -202,15 +285,18 @@ function renderAttachmentPreview(props: ChatProps) {
 
 export function renderChat(props: ChatProps) {
   const canCompose = props.connected;
-  const isBusy = props.sending || props.stream !== null;
-  const canAbort = Boolean(props.canAbort && props.onAbort);
+  const { isBusy, canAbort } = computeStopButtonVisible(props);
   const activeSession = props.sessions?.sessions?.find((row) => row.key === props.sessionKey);
   const reasoningLevel = activeSession?.reasoningLevel ?? "off";
-  const showReasoning = props.showThinking && reasoningLevel !== "off";
+  const thinkingActive = (props.thinkingToggleLevel && props.thinkingToggleLevel !== "off") || (props.thinkingLevel && props.thinkingLevel !== "off");
+  const showReasoning = props.showThinking && (reasoningLevel !== "off" || thinkingActive);
   const assistantIdentity = {
     name: props.assistantName,
     avatar: props.assistantAvatar ?? props.assistantAvatarUrl ?? null,
   };
+
+  const totalHistory = Array.isArray(props.messages) ? props.messages.length : 0;
+  const isHydrating = props.visibleHistoryCount > 0 && props.visibleHistoryCount < totalHistory;
 
   const hasAttachments = (props.attachments?.length ?? 0) > 0;
   const composePlaceholder = !props.connected
@@ -229,6 +315,19 @@ export function renderChat(props: ChatProps) {
       role="log"
       aria-live="polite"
       @scroll=${props.onChatScroll}
+      @click=${(e: Event) => {
+        const link = (e.target as HTMLElement).closest(".chat-path-link");
+        if (!link) {
+          return;
+        }
+        e.preventDefault();
+        const path = (link as HTMLElement).dataset.path;
+        if (path) {
+          const w = window as Record<string, unknown>;
+          const oneclaw = w.oneclaw as Record<string, (p: string) => void> | undefined;
+          oneclaw?.openPath?.(path);
+        }
+      }}
     >
       ${
         props.loading
@@ -270,6 +369,7 @@ export function renderChat(props: ChatProps) {
               showReasoning,
               assistantName: props.assistantName,
               assistantAvatar: assistantIdentity.avatar,
+              isHydrating,
             });
           }
 
@@ -293,7 +393,7 @@ export function renderChat(props: ChatProps) {
               type="button"
               @click=${props.onToggleFocusMode}
               aria-label=${t("chat.exitFocus")}
-              title=${t("chat.exitFocus")}
+              data-tooltip=${t("chat.exitFocus")}
             >
               ${icons.x}
             </button>
@@ -378,7 +478,7 @@ export function renderChat(props: ChatProps) {
               type="button"
               @click=${props.onScrollToBottom}
             >
-              ${t("chat.newMessages")} ${icons.arrowDown}
+              ${icons.arrowDown}
             </button>
           `
           : nothing
@@ -386,83 +486,169 @@ export function renderChat(props: ChatProps) {
 
       <div class="chat-compose">
         ${renderAttachmentPreview(props)}
-        <div class="chat-compose__row">
-          <button
-            class="btn chat-compose__attach-btn"
-            type="button"
-            @click=${async () => {
-              const w = window as Record<string, unknown>;
-              const oneclaw = w.oneclaw as Record<string, (...args: unknown[]) => Promise<string[]>> | undefined;
-              if (!oneclaw?.selectFiles) {
-                return;
-              }
-              const paths = await oneclaw.selectFiles();
-              if (!paths?.length) {
-                return;
-              }
-              const current = props.attachments ?? [];
-              const additions = paths.map((p: string) => ({
-                id: generateAttachmentId(),
-                filePath: p,
-                name: p.split(/[/\\]/).pop() || p,
-              }));
-              props.onAttachmentsChange?.([...current, ...additions]);
-            }}
-            title=${t("chat.attachFile")}
+        <div class="field chat-compose__field">
+          <span>${t("chat.messageLabel")}</span>
+          <textarea
+            ${ref((el) => el && adjustTextareaHeight(el as HTMLTextAreaElement, true))}
+            .value=${props.draft}
+            dir=${detectTextDirection(props.draft)}
             ?disabled=${!props.connected}
-          >
-            ${icons.paperclip}
-          </button>
-          <label class="field chat-compose__field">
-            <span>${t("chat.messageLabel")}</span>
-            <textarea
-              ${ref((el) => el && adjustTextareaHeight(el as HTMLTextAreaElement))}
-              .value=${props.draft}
-              dir=${detectTextDirection(props.draft)}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key !== "Enter") {
+                return;
+              }
+              if (e.isComposing || e.keyCode === 229) {
+                return;
+              }
+              if (e.shiftKey) {
+                return;
+              } // Allow Shift+Enter for line breaks
+              if (!props.connected) {
+                return;
+              }
+              e.preventDefault();
+              if (canCompose) {
+                props.onSend();
+              }
+            }}
+            @input=${(e: Event) => {
+              const target = e.target as HTMLTextAreaElement;
+              adjustTextareaHeight(target);
+              props.onDraftChange(target.value);
+            }}
+            @paste=${(e: ClipboardEvent) => handlePaste(e, props)}
+            placeholder=${composePlaceholder}
+          ></textarea>
+        <div class="chat-compose__toolbar">
+          <div class="chat-compose__toolbar-left">
+            <button
+              class="chat-compose__tool-btn"
+              type="button"
+              @click=${async () => {
+                const w = window as Record<string, unknown>;
+                const oneclaw = w.oneclaw as Record<string, (...args: unknown[]) => Promise<string[]>> | undefined;
+                if (!oneclaw?.selectFiles) {
+                  return;
+                }
+                const paths = await oneclaw.selectFiles();
+                if (!paths?.length) {
+                  return;
+                }
+                const current = props.attachments ?? [];
+                const additions = paths.map((p: string) => ({
+                  id: generateAttachmentId(),
+                  filePath: p,
+                  name: p.split(/[/\\]/).pop() || p,
+                }));
+                props.onAttachmentsChange?.([...current, ...additions]);
+              }}
+              data-tooltip=${t("chat.attachFile")}
               ?disabled=${!props.connected}
-              @keydown=${(e: KeyboardEvent) => {
-                if (e.key !== "Enter") {
-                  return;
-                }
-                if (e.isComposing || e.keyCode === 229) {
-                  return;
-                }
-                if (e.shiftKey) {
-                  return;
-                } // Allow Shift+Enter for line breaks
-                if (!props.connected) {
-                  return;
-                }
-                e.preventDefault();
-                if (canCompose) {
-                  props.onSend();
-                }
-              }}
-              @input=${(e: Event) => {
-                const target = e.target as HTMLTextAreaElement;
-                adjustTextareaHeight(target);
-                props.onDraftChange(target.value);
-              }}
-              @paste=${(e: ClipboardEvent) => handlePaste(e, props)}
-              placeholder=${composePlaceholder}
-            ></textarea>
-          </label>
-          <div class="chat-compose__actions">
+            >
+              ${icons.paperclip}
+            </button>
+            ${props.thinkingToggleLevels && props.thinkingToggleLevels.length > 0
+              ? html`
+                  <button
+                    class="chat-compose__thinking-toggle ${props.thinkingToggleLevel && props.thinkingToggleLevel !== "off" ? "chat-compose__thinking-toggle--active" : ""}"
+                    data-tooltip=${props.thinkingToggleLevel && props.thinkingToggleLevel !== "off" ? t("chat.thinkingOn") : t("chat.thinkingOff")}
+                    ?disabled=${!props.connected}
+                    @click=${() => {
+                      props.onThinkingToggle?.();
+                    }}
+                    @contextmenu=${(e: Event) => {
+                      if (props.isBinaryThinking) return;
+                      e.preventDefault();
+                      const el = e.currentTarget as HTMLElement;
+                      const popover = el.querySelector(".chat-compose__thinking-popover") as HTMLElement | null;
+                      if (!popover) return;
+                      const isOpen = popover.classList.contains("chat-compose__thinking-popover--open");
+                      if (isOpen) {
+                        popover.classList.remove("chat-compose__thinking-popover--open");
+                      } else {
+                        popover.classList.add("chat-compose__thinking-popover--open");
+                        const close = (ev: MouseEvent) => {
+                          if (!el.contains(ev.target as Node)) {
+                            popover.classList.remove("chat-compose__thinking-popover--open");
+                            document.removeEventListener("click", close);
+                            document.removeEventListener("contextmenu", close);
+                          }
+                        };
+                        requestAnimationFrame(() => {
+                          document.addEventListener("click", close);
+                          document.addEventListener("contextmenu", close);
+                        });
+                      }
+                    }}
+                  >
+                    ${icons.brain}
+                    ${!props.isBinaryThinking
+                      ? html`<div class="chat-compose__thinking-popover">
+                          ${props.thinkingToggleLevels!.filter(l => l !== "off").map(level => html`
+                            <button
+                              class="chat-compose__thinking-option ${level === props.thinkingToggleLevel ? "chat-compose__thinking-option--selected" : ""}"
+                              @click=${(e: Event) => {
+                                e.stopPropagation();
+                                props.onThinkingLevelChange?.(level);
+                                const popover = (e.currentTarget as HTMLElement).closest(".chat-compose__thinking-popover") as HTMLElement;
+                                if (popover) popover.classList.remove("chat-compose__thinking-popover--open");
+                              }}
+                            >
+                              ${level}
+                            </button>
+                          `)}
+                        </div>`
+                      : nothing
+                    }
+                  </button>
+                `
+              : nothing
+            }
+            ${props.configuredModels && props.configuredModels.length >= 2
+              ? html`
+                <select
+                  class="chat-compose__model-select"
+                  .value=${props.currentModel ?? ""}
+                  @change=${(e: Event) => {
+                    const val = (e.target as HTMLSelectElement).value;
+                    props.onModelChange?.(val);
+                  }}
+                  ?disabled=${!props.connected}
+                >
+                  ${props.configuredModels.map(m => html`
+                    <option value=${m.key} ?selected=${m.key === props.currentModel}>
+                      ${m.name}
+                    </option>
+                  `)}
+                </select>
+              `
+              : props.configuredModels && props.configuredModels.length === 1
+                ? html`
+                  <select class="chat-compose__model-select" disabled>
+                    <option selected>${props.configuredModels[0].name}</option>
+                  </select>
+                `
+                : nothing
+            }
+          </div>
+          <div class="chat-compose__toolbar-right">
+            ${renderContextMeter(activeSession, props.dirtyMeterSessions)}
             ${isBusy && canAbort
               ? html`<button
-                  class="btn primary"
+                  class="chat-compose__send-btn"
                   ?disabled=${!props.connected}
                   @click=${props.onAbort}
-                  title=${t("chat.stop")}
+                  data-tooltip=${t("chat.stop")}
                 >${icons.stop}</button>`
               : html`<button
-                  class="btn primary"
+                  class="chat-compose__send-btn"
                   ?disabled=${!props.connected}
                   @click=${props.onSend}
-                  title=${t("chat.send")}
+                  data-tooltip=${t("chat.send")}
                 >${icons.arrowUp}</button>`
             }
           </div>
+        </div>
         </div>
       </div>
     </section>
@@ -523,14 +709,18 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
   const items: ChatItem[] = [];
   const history = Array.isArray(props.messages) ? props.messages : [];
   const tools = Array.isArray(props.toolMessages) ? props.toolMessages : [];
-  const historyStart = Math.max(0, history.length - CHAT_HISTORY_RENDER_LIMIT);
+  const visibleHistoryCount =
+    props.visibleHistoryCount > 0
+      ? Math.min(props.visibleHistoryCount, CHAT_HISTORY_RENDER_LIMIT, history.length)
+      : Math.min(history.length, CHAT_HISTORY_RENDER_LIMIT);
+  const historyStart = Math.max(0, history.length - visibleHistoryCount);
   if (historyStart > 0) {
     items.push({
       kind: "message",
       key: "chat:history:notice",
       message: {
         role: "system",
-        content: `Showing last ${CHAT_HISTORY_RENDER_LIMIT} messages (${historyStart} hidden).`,
+        content: `Showing last ${visibleHistoryCount} messages (${historyStart} hidden).`,
         timestamp: Date.now(),
       },
     });
@@ -563,6 +753,9 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
       message: msg,
     });
   }
+  // toolMessages 本身是摊平的时间线（由 app-tool-stream.ts::syncToolStreamMessages 构造）：
+  // 依次包含 leadingSegment 文本 / tool call / tool result，作为普通 message 追加即可，
+  // groupMessages 会按 role 自动分组成和 history 一致的 "assistant 文本+call → toolResult" 节奏。
   if (props.showThinking) {
     for (let i = 0; i < tools.length; i++) {
       items.push({

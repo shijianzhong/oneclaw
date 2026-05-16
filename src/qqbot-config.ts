@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
-import { resolveGatewayCwd } from "./constants";
+import { resolveGatewayPackageDir } from "./constants";
+import { syncPluginAllowOnEnable } from "./kimi-config";
 
 export const QQBOT_PLUGIN_ID = "qqbot";
 
@@ -18,18 +19,17 @@ export interface SaveQqbotConfigParams {
   markdownSupport?: boolean;
 }
 
-// 统一解析 QQ Bot 插件目录，兼容 dev / packaged 环境。
+// 统一解析 QQ Bot 插件目录。openclaw 自 2026.4.5 起将 @openclaw/qqbot 作为内置
+// extension vendor 在自身 dist/extensions/ 下，OneClaw 不再单独 ship 也不需要
+// reconcile 到 ~/.openclaw/extensions/。
 export function resolveQqbotPluginDir(): string {
-  return path.join(resolveGatewayCwd(), "extensions", QQBOT_PLUGIN_ID);
+  return path.join(resolveGatewayPackageDir(), "dist", "extensions", QQBOT_PLUGIN_ID);
 }
 
 // 检查 QQ Bot 插件是否已经随应用一起打包。
 export function isQqbotPluginBundled(): boolean {
   const pluginDir = resolveQqbotPluginDir();
-  const hasEntry =
-    fs.existsSync(path.join(pluginDir, "index.ts")) ||
-    fs.existsSync(path.join(pluginDir, "dist", "index.js"));
-  return hasEntry && fs.existsSync(path.join(pluginDir, "openclaw.plugin.json"));
+  return fs.existsSync(path.join(pluginDir, "openclaw.plugin.json"));
 }
 
 // 从当前用户配置中提取 QQ Bot 配置，供设置页回显。
@@ -40,7 +40,7 @@ export function extractQqbotConfig(config: any): ExtractedQqbotConfig {
     enabled: entry?.enabled === true || channel?.enabled === true,
     appId: typeof channel?.appId === "string" ? channel.appId : "",
     clientSecret: typeof channel?.clientSecret === "string" ? channel.clientSecret : "",
-    markdownSupport: channel?.markdownSupport !== false,
+    markdownSupport: channel?.markdownSupport === true,
   };
 }
 
@@ -89,12 +89,14 @@ export function saveQqbotConfig(config: any, params: SaveQqbotConfigParams): voi
     return;
   }
 
+  syncPluginAllowOnEnable(config, QQBOT_PLUGIN_ID);
+
   config.channels[QQBOT_PLUGIN_ID] = {
     ...existingChannel,
     enabled: true,
     appId: String(params.appId ?? "").trim(),
     clientSecret: String(params.clientSecret ?? "").trim(),
-    markdownSupport: params.markdownSupport !== false,
+    markdownSupport: params.markdownSupport === true,
     allowFrom: normalizeQqbotAllowFrom(existingChannel.allowFrom),
   };
 

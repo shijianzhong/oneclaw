@@ -21,6 +21,7 @@
       placeholder: "sk-ant-...",
       platformUrl: "https://console.anthropic.com?utm_source=oneclaw",
       models: [
+        "claude-opus-4-7",
         "claude-sonnet-4-6",
         "claude-opus-4-6",
         "claude-sonnet-4-5-20250929",
@@ -30,13 +31,13 @@
     },
     moonshot: {
       placeholder: "sk-...",
-      models: ["kimi-k2.5", "kimi-k2-0905-preview"],
+      models: ["kimi-k2.6", "kimi-k2.5", "kimi-k2-0905-preview"],
       hasSubPlatform: true,
     },
     openai: {
       placeholder: "sk-...",
       platformUrl: "https://platform.openai.com?utm_source=oneclaw",
-      models: ["gpt-5.4", "gpt-5.2", "gpt-5.2-codex"],
+      models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.2-codex"],
     },
     google: {
       placeholder: "AI...",
@@ -50,39 +51,39 @@
   };
 
   const SUB_PLATFORM_URLS = {
-    "moonshot-cn": "https://platform.moonshot.cn?utm_source=oneclaw",
+    "moonshot-cn": "https://platform.kimi.com?utm_source=oneclaw",
     "moonshot-ai": "https://platform.moonshot.ai?utm_source=oneclaw",
     "kimi-code": "https://kimi.com/code?utm_source=oneclaw",
   };
 
-  const KIMI_CODE_MODELS = ["k2p5"];
+  const KIMI_CODE_MODELS = ["kimi-for-coding"];
 
   // Custom tab 内置预设
   const CUSTOM_PRESETS = {
     "minimax": {
       providerKey: "minimax",
       placeholder: "eyJ...",
-      models: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+      models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
     },
     "minimax-cn": {
       providerKey: "minimax-cn",
       placeholder: "eyJ...",
-      models: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+      models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
     },
     "zai-global": {
-      providerKey: "zai",
+      providerKey: "zai-global",
       placeholder: "...",
-      models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+      models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
     },
     "zai-cn": {
-      providerKey: "zai",
+      providerKey: "zai-cn",
       placeholder: "...",
-      models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+      models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
     },
     "zai-cn-coding": {
-      providerKey: "zai",
+      providerKey: "zai-cn-coding",
       placeholder: "...",
-      models: ["glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
+      models: ["glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx"],
     },
     "volcengine": {
       providerKey: "volcengine",
@@ -90,19 +91,19 @@
       models: ["doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-2.0-code", "doubao-seed-code"],
     },
     "volcengine-coding": {
-      providerKey: "volcengine",
+      providerKey: "volcengine-coding",
       placeholder: "...",
-      models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-code", "minimax-m2.5", "glm-4.7", "deepseek-v3.2", "kimi-k2.5", "ark-code-latest"],
+      models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite", "doubao-seed-code", "minimax-m2.7", "glm-5.1", "deepseek-v3.2", "kimi-k2.6", "ark-code-latest"],
     },
     "qwen": {
       providerKey: "qwen",
       placeholder: "sk-...",
-      models: ["qwen-coder-plus-latest", "qwen-plus-latest", "qwen-max-latest", "qwen-turbo-latest"],
+      models: ["qwen3.6-max-preview", "qwen3.6-plus", "qwen-coder-plus-latest", "qwen-plus-latest", "qwen-max-latest", "qwen-turbo-latest"],
     },
     "qwen-coding": {
-      providerKey: "qwen",
+      providerKey: "qwen-coding",
       placeholder: "sk-sp-...",
-      models: ["qwen3.5-plus", "kimi-k2.5", "glm-5", "MiniMax-M2.5",],
+      models: ["qwen3.6-plus", "qwen3.5-plus", "kimi-k2.6", "glm-5.1", "MiniMax-M2.7"],
     },
     "deepseek": {
       providerKey: "deepseek",
@@ -124,7 +125,7 @@
       "nav.chat": "Remote Control",
       "nav.feishu": "Feishu Integration",
       "chat.title": "Remote Control",
-      "chat.desc": "Connect Feishu, WeCom, DingTalk, Kimi, or QQ to control OneClaw remotely from your messaging app",
+      "chat.desc": "Connect WeChat, Feishu, WeCom, DingTalk, Kimi, or QQ to control OneClaw remotely from your messaging app",
       "chat.platformFeishu": "Feishu",
       "chat.platformFeishuMeta": "Lark / Feishu bot",
       "chat.platformWecom": "WeCom",
@@ -262,6 +263,20 @@
       "qq.markdownSupportHint": "Turn this off if the current bot account does not have markdown message permission",
       "qq.save": "Save",
       "qq.saving": "Saving…",
+      "chat.platformWeixin": "WeChat",
+      "chat.platformWeixinMeta": "WeChat QR login",
+      "weixin.desc": "Scan a QR code with WeChat to connect OneClaw and chat directly in WeChat",
+      "weixin.login": "Connect WeChat",
+      "weixin.cancel": "Cancel",
+      "weixin.waitingScan": "Scan with the latest WeChat to log in",
+      "weixin.scanned": "Scanned! Please confirm in WeChat…",
+      "weixin.connected": "Connected",
+      "weixin.loginFailed": "Login failed",
+      "weixin.disconnect": "Disconnect",
+      "weixin.disconnected": "Disconnected",
+      "weixin.notBundled": "WeChat plugin not found. Please reinstall OneClaw.",
+      "weixin.gatewayNotRunning": "Gateway is not running. Please start it first.",
+      "error.weixinNotBundled": "WeChat plugin not found. Please reinstall OneClaw.",
       "error.noPairingCode": "Invalid pairing code",
       "error.loadPairingFailed": "Failed to load pairing requests",
       "error.loadApprovedFailed": "Failed to load approved accounts",
@@ -286,6 +301,7 @@
       "error.connection": "Connection error: ",
       "nav.kimi": "KimiClaw",
       "nav.search": "Search",
+      "nav.memory": "Memory",
       "nav.appearance": "Appearance",
       "nav.backup": "Backup & Restore",
       "kimi.title": "KimiClaw",
@@ -295,6 +311,9 @@
       "kimi.guideText": "Click 'Associate existing OpenClaw' → copy command → paste below",
       "kimi.inputLabel": "Paste BotToken or command (auto parse token)",
       "kimi.tokenParsed": "Token parsed: ",
+      "kimi.advancedLabel": "Advanced settings",
+      "kimi.bridgeUrlLabel": "Custom Bridge WS URL",
+      "kimi.apiHostLabel": "Custom Kimi API Host",
       "kimi.save": "Save",
       "kimi.saving": "Saving…",
       "error.noKimiBotToken": "Please paste the command or enter your Bot Token",
@@ -310,10 +329,17 @@
       "search.advancedToggle": "Advanced",
       "search.serviceBaseUrlLabel": "Service Base URL",
       "search.serviceBaseUrlHint": "Leave empty to use the default endpoint. /search and /fetch will be appended automatically",
+      "memory.title": "Memory",
+      "memory.desc": "Memory allows the assistant to remember context across sessions",
+      "memory.sessionMemory": "Auto-save session memory on /new",
+      "memory.embeddingSearch": "Memory search (semantic recall)",
+      "memory.embeddingActive": "Active — using Kimi bge_m3_embed via auth proxy",
+      "memory.embeddingInactive": "Not configured — add a Kimi subscription to enable",
+      "memory.save": "Save",
+      "memory.saving": "Saving…",
       "nav.advanced": "Advanced",
       "advanced.title": "Advanced",
       "advanced.desc": "Browser tool and messaging channel settings",
-      "advanced.sessionMemory": "Auto-save session memory on /new",
       "advanced.browserProfile": "Browser Profile",
       "advanced.browserOpenclaw": "Standalone browser instance",
       "advanced.browserChrome": "Chrome extension",
@@ -389,15 +415,27 @@
       "about.downloading": "Downloading",
       "about.installRestart": "Install & Restart",
       "about.updateFailed": "Check failed, try again later",
+      "settings.modelList": "Models",
+      "settings.addModel": "+ Add Model",
+      "settings.modelAlias": "Alias",
+      "settings.modelAliasPlaceholder": "Optional, for easy identification",
+      "settings.deleteModel": "Delete",
+      "settings.setDefault": "Default",
+      "settings.addModelSave": "Add",
+      "settings.newModelPlaceholder": "New Model",
+      "settings.confirmDelete": "Delete this model?",
+      "settings.cannotDeleteDefault": "Cannot delete the default model",
+      "settings.modelDeleted": "Model deleted",
+      "settings.defaultModelSet": "Default model updated",
     },
     zh: {
       "settings.backToChat": "返回",
       "title": "设置",
-      "nav.provider": "模型配置",
+      "nav.provider": "模型",
       "nav.chat": "远程控制",
       "nav.feishu": "飞书集成",
       "chat.title": "远程控制",
-      "chat.desc": "连接飞书、企业微信、钉钉、Kimi 或 QQ，从聊天软件远程控制 OneClaw",
+      "chat.desc": "连接微信、飞书、企业微信、钉钉、Kimi 或 QQ，从聊天软件远程控制 OneClaw",
       "chat.platformFeishu": "飞书",
       "chat.platformFeishuMeta": "Lark / 飞书机器人",
       "chat.platformWecom": "企业微信",
@@ -535,6 +573,20 @@
       "qq.markdownSupportHint": "如果当前机器人还没有开通 Markdown 消息权限 请先关闭这个开关",
       "qq.save": "保存",
       "qq.saving": "保存中…",
+      "chat.platformWeixin": "微信",
+      "chat.platformWeixinMeta": "微信扫码连接",
+      "weixin.desc": "使用微信扫码连接 OneClaw，在微信中直接对话",
+      "weixin.login": "连接微信",
+      "weixin.cancel": "取消",
+      "weixin.waitingScan": "使用最新版微信扫码登录",
+      "weixin.scanned": "已扫码，请在微信中确认…",
+      "weixin.connected": "已连接",
+      "weixin.loginFailed": "登录失败",
+      "weixin.disconnect": "断开连接",
+      "weixin.disconnected": "已断开",
+      "weixin.notBundled": "微信插件组件缺失，请重新安装 OneClaw",
+      "weixin.gatewayNotRunning": "Gateway 未运行，请先启动",
+      "error.weixinNotBundled": "微信插件组件缺失，请重新安装 OneClaw",
       "error.noPairingCode": "配对码无效",
       "error.loadPairingFailed": "读取待审批请求失败",
       "error.loadApprovedFailed": "读取已授权列表失败",
@@ -558,8 +610,9 @@
       "error.verifyFailed": "验证失败 请检查 API 密钥",
       "error.connection": "连接错误：",
       "nav.kimi": "KimiClaw",
-      "nav.search": "搜索配置",
-      "nav.appearance": "外观显示",
+      "nav.search": "搜索",
+      "nav.memory": "记忆",
+      "nav.appearance": "外观",
       "nav.backup": "备份恢复",
       "kimi.title": "KimiClaw",
       "kimi.desc": "通过 Kimi 远程遥控 OneClaw",
@@ -568,6 +621,9 @@
       "kimi.guideText": '点击"关联已有 OpenClaw" → 复制命令 → 粘贴到下方输入框',
       "kimi.inputLabel": "粘贴 BotToken 或命令(自动解析Token)",
       "kimi.tokenParsed": "解析到 Token：",
+      "kimi.advancedLabel": "高级设置",
+      "kimi.bridgeUrlLabel": "自定义 Bridge WS URL",
+      "kimi.apiHostLabel": "自定义 Kimi API Host",
       "kimi.save": "保存",
       "kimi.saving": "保存中…",
       "error.noKimiBotToken": "请粘贴命令或输入 Bot Token",
@@ -583,10 +639,17 @@
       "search.advancedToggle": "高级配置",
       "search.serviceBaseUrlLabel": "服务地址",
       "search.serviceBaseUrlHint": "留空使用默认地址。系统会自动追加 /search 和 /fetch 路径",
-      "nav.advanced": "高级选项",
+      "memory.title": "记忆",
+      "memory.desc": "记忆功能让助手在跨会话时保留上下文",
+      "memory.sessionMemory": "开新对话时自动保存会话记忆",
+      "memory.embeddingSearch": "记忆搜索（语义召回）",
+      "memory.embeddingActive": "已启用 — 通过认证代理使用 Kimi bge_m3_embed",
+      "memory.embeddingInactive": "未配置 — 添加 Kimi 订阅即可启用",
+      "memory.save": "保存",
+      "memory.saving": "保存中…",
+      "nav.advanced": "高级",
       "advanced.title": "高级选项",
       "advanced.desc": "浏览器工具与消息频道设置",
-      "advanced.sessionMemory": "开新对话时自动保存会话记忆",
       "advanced.browserProfile": "浏览器配置",
       "advanced.browserOpenclaw": "独立浏览器(建议)",
       "advanced.browserChrome": "Chrome 扩展",
@@ -662,6 +725,18 @@
       "about.downloading": "下载中",
       "about.installRestart": "安装并重启",
       "about.updateFailed": "检查失败 请稍后重试",
+      "settings.modelList": "模型列表",
+      "settings.addModel": "+ 新增模型",
+      "settings.modelAlias": "别名",
+      "settings.modelAliasPlaceholder": "可选，方便识别",
+      "settings.deleteModel": "删除",
+      "settings.setDefault": "默认",
+      "settings.addModelSave": "新增",
+      "settings.newModelPlaceholder": "新模型",
+      "settings.confirmDelete": "确认删除此模型？",
+      "settings.cannotDeleteDefault": "不能删除当前默认模型",
+      "settings.modelDeleted": "模型已删除",
+      "settings.defaultModelSet": "默认模型已更新",
     },
   };
 
@@ -715,6 +790,12 @@
     usageLimitBar: $("#usageLimitBar"),
     usageRefreshTime: $("#usageRefreshTime"),
     btnUsageRefresh: $("#btnUsageRefresh"),
+    modelAliasGroup: $("#modelAliasGroup"),
+    modelAlias: $("#modelAlias"),
+    modelList: $("#modelList"),
+    addModelBtn: $("#addModelBtn"),
+    deleteModelBtn: $("#deleteModelBtn"),
+    setDefaultBtn: $("#setDefaultBtn"),
     msgBox: $("#msgBox"),
     btnSave: $("#btnSave"),
     btnSaveText: $("#btnSave .btn-text"),
@@ -791,10 +872,25 @@
     btnQqSave: $("#btnQqSave"),
     btnQqSaveText: $("#btnQqSave .btn-text"),
     btnQqSaveSpinner: $("#btnQqSave .btn-spinner"),
+    // Weixin tab
+    weixinEnabled: $("#weixinEnabled"),
+    weixinFields: $("#weixinFields"),
+    weixinNotBundledHint: $("#weixinNotBundledHint"),
+    weixinQrContainer: $("#weixinQrContainer"),
+    weixinQrImage: $("#weixinQrImage"),
+    weixinQrStatus: $("#weixinQrStatus"),
+    weixinConnectedInfo: $("#weixinConnectedInfo"),
+    weixinAccountId: $("#weixinAccountId"),
+    btnWeixinRemove: $("#btnWeixinRemove"),
+    weixinMsgBox: $("#weixinMsgBox"),
+    weixinStatusDot: $("#weixinStatusDot"),
     // Kimi tab
     kimiEnabled: $("#kimiEnabled"),
     kimiFields: $("#kimiFields"),
     kimiSettingsInput: $("#kimiSettingsInput"),
+    kimiAdvancedWrap: $("#kimiAdvancedWrap"),
+    kimiBridgeUrlInput: $("#kimiBridgeUrlInput"),
+    kimiApiHostInput: $("#kimiApiHostInput"),
     btnToggleKimiToken: $("#btnToggleKimiToken"),
     kimiMsgBox: $("#kimiMsgBox"),
     kimiBotPageLink: $("#kimiBotPageLink"),
@@ -816,9 +912,17 @@
     btnSearchSave: $("#btnSearchSave"),
     btnSearchSaveText: $("#btnSearchSave .btn-text"),
     btnSearchSaveSpinner: $("#btnSearchSave .btn-spinner"),
+    // Memory tab
+    memorySessionEnabled: $("#memorySessionEnabled"),
+    memoryEmbeddingEnabled: $("#memoryEmbeddingEnabled"),
+    memoryEmbeddingInfo: $("#memoryEmbeddingInfo"),
+    memoryEmbeddingStatus: $("#memoryEmbeddingStatus"),
+    memoryMsgBox: $("#memoryMsgBox"),
+    btnMemorySave: $("#btnMemorySave"),
+    btnMemorySaveText: $("#btnMemorySave .btn-text"),
+    btnMemorySaveSpinner: $("#btnMemorySave .btn-spinner"),
     // Advanced tab
     clawHubRegistry: $("#clawHubRegistry"),
-    sessionMemoryEnabled: $("#sessionMemoryEnabled"),
     imessageEnabled: $("#imessageEnabled"),
     launchAtLoginRow: $("#launchAtLoginRow"),
     launchAtLoginEnabled: $("#launchAtLoginEnabled"),
@@ -853,7 +957,13 @@
   // ── 状态 ──
 
   let currentProvider = "moonshot";
+  // 编辑器状态机（discriminated union）:
+  // { mode: "idle" } | { mode: "add" } | { mode: "edit", modelKey: string, providerKey: string }
+  var editorState = { mode: "idle" };
+  let modelListData = []; // settingsGetConfiguredModels 返回的模型列表缓存
   let saving = false;
+  // OAuth 登录后暂存真实 access_token，点击"新增/保存"时才使用
+  var pendingOAuthToken = null;
   let currentChatPlatform = "feishu";
   let chSaving = false;
   let chPairingLoading = false;
@@ -880,11 +990,12 @@
   let gatewayOperating = false;
   let gatewayStateTimer = null;
   let currentLang = "en";
-  let initialTab = "provider";
-  let initialChatPlatform = "feishu";
+  let initialTab = "channels";
+  let initialChatPlatform = "weixin";
   let startupNotice = "";
   const CHAT_PLATFORM_PANEL_IDS = {
     feishu: "chatPlatformFeishu",
+    weixin: "chatPlatformWeixin",
     wecom: "chatPlatformWecom",
     dingtalk: "chatPlatformDingtalk",
     kimi: "chatPlatformKimi",
@@ -915,8 +1026,8 @@
       currentLang = browserLang.startsWith("zh") ? "zh" : "en";
     }
     const notice = params.get("notice");
-    initialTab = normalizeTabName(rawTab || "provider");
-    initialChatPlatform = inferChatPlatformFromTab(rawTab) || "feishu";
+    initialTab = normalizeTabName(rawTab || "channels");
+    initialChatPlatform = inferChatPlatformFromTab(rawTab) || "weixin";
     startupNotice = notice || "";
   }
 
@@ -928,6 +1039,10 @@
     document.title = t("title");
     document.querySelectorAll("[data-i18n]").forEach((el) => {
       el.textContent = t(el.getAttribute("data-i18n"));
+    });
+    // placeholder 国际化
+    document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+      el.placeholder = t(el.getAttribute("data-i18n-placeholder"));
     });
     if (els.btnChAccessRefresh) {
       els.btnChAccessRefresh.setAttribute("title", t("feishu.refreshPairing"));
@@ -955,6 +1070,7 @@
   // 兼容 feishu / dingtalk / qq / qqbot 这类历史入口，把它们映射到远程控制子平台。
   function normalizeChatPlatformName(platformName) {
     var raw = String(platformName || "").trim().toLowerCase();
+    if (raw === "weixin" || raw === "wechat" || raw === "openclaw-weixin") return "weixin";
     if (raw === "wecom" || raw === "wechat-work" || raw === "wecom-openclaw-plugin") return "wecom";
     if (raw === "dingtalk" || raw === "dingtalk-connector") return "dingtalk";
     if (raw === "qq" || raw === "qqbot") return "qqbot";
@@ -967,6 +1083,9 @@
     var raw = String(tabName || "").trim().toLowerCase();
     if (
       raw === "feishu" ||
+      raw === "weixin" ||
+      raw === "wechat" ||
+      raw === "openclaw-weixin" ||
       raw === "wecom" ||
       raw === "wecom-openclaw-plugin" ||
       raw === "dingtalk" ||
@@ -1049,7 +1168,11 @@
   }
 
   // 根据 provider + subPlatform 查找已保存的配置
-  function lookupSavedProvider(provider, subPlatform) {
+  // overrideKey: 编辑已有模型时传入真实 providerKey，跳过推断
+  function lookupSavedProvider(provider, subPlatform, overrideKey) {
+    if (overrideKey && savedProviders[overrideKey]) {
+      return savedProviders[overrideKey];
+    }
     if (provider === "moonshot") {
       var sub = subPlatform || getSubPlatform();
       var provKey = sub === "kimi-code" ? "kimi-coding" : "moonshot";
@@ -1060,7 +1183,7 @@
       var presetKey = els.customPreset.value;
       var preset = presetKey ? CUSTOM_PRESETS[presetKey] : null;
       if (preset) {
-        return savedProviders[preset.providerKey] || savedProviders["custom"] || null;
+        return savedProviders[preset.providerKey] || null;
       }
       return savedProviders["custom"] || null;
     }
@@ -1068,8 +1191,9 @@
   }
 
   // 用已保存的配置回填 UI（apiKey、model、custom 字段）
-  function fillSavedProviderFields(provider, subPlatform) {
-    var saved = lookupSavedProvider(provider, subPlatform);
+  // overrideKey: 编辑模式下传入真实 providerKey
+  function fillSavedProviderFields(provider, subPlatform, overrideKey) {
+    var saved = lookupSavedProvider(provider, subPlatform, overrideKey);
     if (!saved) {
       els.apiKeyInput.value = "";
       return;
@@ -1126,6 +1250,9 @@
     }
 
     updateOAuthVisibility();
+
+    // 新增/编辑模式下始终显示别名
+    toggleEl(els.modelAliasGroup, true);
 
     // 从缓存回填已保存的 provider 配置
     fillSavedProviderFields(provider);
@@ -1244,7 +1371,13 @@
       els.oauthAdvanced.classList.remove("hidden", "details-advanced--plain");
       els.oauthAdvanced.removeAttribute("open");
       els.platformLink.classList.add("hidden");
-      checkOAuthStatus();
+      // 新增模式下只检查登录状态，不加载用量
+      if (editorState.mode === "add") {
+        toggleEl(els.usagePanel, false);
+        checkOAuthStatusOnly();
+      } else {
+        checkOAuthStatus();
+      }
     } else {
       // 非 OAuth 模式：展开且隐藏折叠外观，字段正常显示
       els.oauthAdvanced.classList.remove("hidden");
@@ -1252,6 +1385,21 @@
       els.oauthAdvanced.setAttribute("open", "");
       toggleEl(els.usagePanel, false);
     }
+  }
+
+  // 仅检查登录状态，切换按钮显隐（不加载用量，用于新增模式）
+  async function checkOAuthStatusOnly() {
+    if (!window.oneclaw?.kimiOAuthStatus) return;
+    try {
+      var status = await window.oneclaw.kimiOAuthStatus();
+      if (status && status.loggedIn) {
+        toggleEl(els.btnOAuth, false);
+        toggleEl(els.btnOAuthLogout, true);
+      } else {
+        toggleEl(els.btnOAuth, true);
+        toggleEl(els.btnOAuthLogout, false);
+      }
+    } catch { }
   }
 
   // 检查当前 OAuth 登录状态，切换登录/退出按钮
@@ -1335,58 +1483,12 @@
         return;
       }
 
-      var modelID = els.modelSelect.value === CUSTOM_MODEL_SENTINEL
-        ? (els.customModelInput.value || "").trim() || "k2p5"
-        : els.modelSelect.value || "k2p5";
-
-      // 先验证 token 是否有会员权限
-      var verifyResult = await window.oneclaw.settingsVerifyKey({
-        provider: "moonshot",
-        apiKey: result.accessToken,
-        modelID: modelID,
-        subPlatform: "kimi-code",
-      });
-
-      if (!verifyResult.success) {
-        if (window.oneclaw.kimiOAuthLogout) {
-          window.oneclaw.kimiOAuthLogout();
-        }
-        showOAuthNoMembership();
-        setOAuthLoading(false);
-        return;
-      }
-
-      var saveResult = await window.oneclaw.settingsSaveProvider({
-        provider: "moonshot",
-        apiKey: result.accessToken,
-        modelID: modelID,
-        baseURL: "",
-        api: "",
-        subPlatform: "kimi-code",
-        supportImage: true,
-        customPreset: "",
-      });
-
+      // 暂存真实 token，点击"新增/保存"时才验证和保存
+      pendingOAuthToken = result.accessToken;
       setOAuthLoading(false);
-
-      if (!saveResult.success) {
-        showMsg(saveResult.message || "Save failed", "error");
-        return;
-      }
-
       showOAuthSuccess();
-      showToast(t("common.saved"));
-      loadUsage();
-
-      // 刷新缓存
-      try {
-        var refreshResult = await window.oneclaw.settingsGetConfig();
-        if (refreshResult.success && refreshResult.data && refreshResult.data.savedProviders) {
-          savedProviders = refreshResult.data.savedProviders;
-        }
-      } catch {}
     } catch (err) {
-      showMsg(t("error.connection") + (err.message || ""), "error");
+      showMsg(t("error.connection") + (err.message || "Unknown error"), "error");
       setOAuthLoading(false);
     }
   }
@@ -1405,6 +1507,7 @@
     if (window.oneclaw?.kimiOAuthLogout) {
       await window.oneclaw.kimiOAuthLogout();
     }
+    pendingOAuthToken = null;
     // 隐藏退出按钮，恢复登录按钮
     toggleEl(els.btnOAuthLogout, false);
     toggleEl(els.btnOAuth, true);
@@ -1495,12 +1598,17 @@
     else if (pct >= 70) barEl.classList.add("warn");
   }
 
-  // 加载用量数据
+  // 加载用量数据（仅编辑模式 + kimi-code 子平台展示）
   async function loadUsage() {
     if (!window.oneclaw?.kimiGetUsage) return;
+    if (editorState.mode === "add") return;
+    if (!(currentProvider === "moonshot" && getSubPlatform() === "kimi-code")) return;
     els.btnUsageRefresh.classList.add("spinning");
     try {
       var result = await window.oneclaw.kimiGetUsage();
+      // 异步返回后再次校验：用户可能已切走或进入新增模式
+      if (editorState.mode === "add") return;
+      if (!(currentProvider === "moonshot" && getSubPlatform() === "kimi-code")) return;
       if (!result.success || !result.data) {
         setUsageCard(els.usageWeeklyPercent, els.usageWeeklyReset, els.usageWeeklyBar, 0, 0, 0);
         setUsageCard(els.usageLimitPercent, els.usageLimitReset, els.usageLimitBar, 0, 0, 0);
@@ -1574,11 +1682,25 @@
 
   // ── 保存 Provider 配置 ──
 
+  // kimi-code OAuth 已登录：退出按钮可见 + kimi-code 子平台
+  function isKimiCodeOAuthActive() {
+    return currentProvider === "moonshot"
+      && getSubPlatform() === "kimi-code"
+      && els.btnOAuthLogout
+      && !els.btnOAuthLogout.classList.contains("hidden");
+  }
+
   async function handleSave() {
     if (saving) return;
 
+    var kimiOAuth = isKimiCodeOAuthActive();
     var apiKey = els.apiKeyInput.value.trim();
-    if (!apiKey) {
+    // kimi-code OAuth：优先使用暂存的真实 token（登录后首次保存）
+    if (kimiOAuth && pendingOAuthToken) {
+      apiKey = pendingOAuthToken;
+    }
+    // kimi-code OAuth 模式下 apiKey 可能是 "proxy-managed"（已保存过），不需要用户手动输入
+    if (!apiKey && !kimiOAuth) {
       showMsg(t("error.noKey"), "error");
       return;
     }
@@ -1590,16 +1712,42 @@
     hideMsg();
 
     try {
-      // 先验证
-      var verifyResult = await window.oneclaw.settingsVerifyKey(params);
+      // kimi-code OAuth 时通过代理验证，其他走直连验证
+      var verifyParams = kimiOAuth
+        ? Object.assign({}, params, { verifyViaProxy: true })
+        : params;
+      var verifyResult = await window.oneclaw.settingsVerifyKey(verifyParams);
       if (!verifyResult.success) {
+        // kimi-code OAuth 首次保存：区分 401（无会员）和其他错误
+        if (kimiOAuth && pendingOAuthToken) {
+          var is401 = verifyResult.message && /\b401\b/.test(verifyResult.message);
+          if (is401) {
+            pendingOAuthToken = null;
+            if (window.oneclaw.kimiOAuthLogout) window.oneclaw.kimiOAuthLogout();
+            showOAuthNoMembership();
+            setSaving(false);
+            return;
+          }
+        }
         showMsg(verifyResult.message || t("error.verifyFailed"), "error");
         setSaving(false);
         return;
       }
 
+      // 构造保存 payload，注入 action / modelKey / 别名
+      var payload = buildSavePayload(params);
+      var alias = (els.modelAlias.value || "").trim();
+      if (alias) payload.modelAlias = alias;
+      payload.action = editorState.mode === "edit" ? "update" : "add";
+      if (editorState.mode === "edit") {
+        payload.modelKey = editorState.modelKey;
+      }
+      payload.setAsDefault = editorState.mode === "edit";
+      // kimi-code OAuth：有真实 token 时后端正常处理，无真实 token 时保留已有代理配置
+      if (kimiOAuth && !pendingOAuthToken) payload.keepProxyAuth = true;
+
       // 再保存
-      var saveResult = await window.oneclaw.settingsSaveProvider(buildSavePayload(params));
+      var saveResult = await window.oneclaw.settingsSaveProvider(payload);
       if (!saveResult.success) {
         showMsg(saveResult.message || "Save failed", "error");
         setSaving(false);
@@ -1607,6 +1755,7 @@
       }
 
       setSaving(false);
+      pendingOAuthToken = null;
       showToast(t("common.saved"));
 
       // 保存成功后刷新 savedProviders 缓存
@@ -1616,6 +1765,9 @@
           savedProviders = refreshResult.data.savedProviders;
         }
       } catch { }
+
+      // 刷新模型列表
+      await renderModelList();
     } catch (err) {
       showMsg(t("error.connection") + (err.message || "Unknown error"), "error");
       setSaving(false);
@@ -2782,6 +2934,192 @@
     }
   }
 
+  // ── 微信状态变量 ──
+  var weixinSaving = false;
+  var weixinLoginPolling = false;
+  var weixinQrcode = null;
+
+  function isWeixinEnabled() {
+    return els.weixinEnabled && els.weixinEnabled.checked;
+  }
+
+  function showWeixinMsg(msg, type) {
+    if (!els.weixinMsgBox) return;
+    els.weixinMsgBox.textContent = msg;
+    els.weixinMsgBox.className = "msg-box msg-" + (type || "info");
+    els.weixinMsgBox.classList.remove("hidden");
+  }
+
+  function hideWeixinMsg() {
+    if (els.weixinMsgBox) els.weixinMsgBox.classList.add("hidden");
+  }
+
+  // 保存微信配置（启用/禁用切换）
+  async function handleWeixinSave() {
+    if (weixinSaving) return;
+    weixinSaving = true;
+    hideWeixinMsg();
+    var enabled = isWeixinEnabled();
+    try {
+      var result = await window.oneclaw.settingsSaveWeixinConfig({
+        enabled: enabled,
+      });
+      if (result.success) {
+        showToast(t("common.saved"));
+        toggleEl(els.weixinFields, enabled);
+        if (enabled) {
+          // 启用时：已连接则显示状态，否则自动发起扫码
+          var cfg = await window.oneclaw.settingsGetWeixinConfig();
+          var accounts = (cfg.success && cfg.data && cfg.data.accounts) || [];
+          if (accounts.length > 0) {
+            showWeixinConnected(accounts[0]);
+          } else {
+            startWeixinLogin();
+          }
+        } else {
+          // 禁用时：取消轮询，重置 UI
+          resetWeixinLoginUI();
+          if (els.weixinConnectedInfo) els.weixinConnectedInfo.classList.add("hidden");
+          if (els.weixinStatusDot) els.weixinStatusDot.classList.remove("active");
+        }
+      } else {
+        showWeixinMsg(result.message || "Save failed", "error");
+      }
+    } catch (err) {
+      showWeixinMsg(t("error.connection") + (err.message || ""), "error");
+    }
+    weixinSaving = false;
+  }
+
+  // 发起微信扫码登录
+  async function startWeixinLogin() {
+    if (weixinLoginPolling) return;
+    hideWeixinMsg();
+    if (els.weixinConnectedInfo) els.weixinConnectedInfo.classList.add("hidden");
+    if (els.weixinQrStatus) els.weixinQrStatus.textContent = t("weixin.waitingScan");
+
+    try {
+      var startResult = await window.oneclaw.settingsWeixinLoginStart();
+      if (!startResult.success || !startResult.data || !startResult.data.qrDataUrl) {
+        showWeixinMsg((startResult.data && startResult.data.message) || startResult.message || t("weixin.loginFailed"), "error");
+        resetWeixinLoginUI();
+        return;
+      }
+      // qrDataUrl 是 main process 生成的 BMP data URL
+      if (els.weixinQrImage && startResult.data.qrDataUrl) {
+        els.weixinQrImage.src = startResult.data.qrDataUrl;
+        if (els.weixinQrContainer) els.weixinQrContainer.classList.remove("hidden");
+      }
+      weixinQrcode = startResult.data.qrcode;
+      weixinLoginPolling = true;
+      pollWeixinLogin();
+    } catch (err) {
+      showWeixinMsg(t("weixin.gatewayNotRunning"), "error");
+      resetWeixinLoginUI();
+    }
+  }
+
+  // 轮询微信登录状态
+  async function pollWeixinLogin() {
+    if (!weixinLoginPolling || !weixinQrcode) return;
+    try {
+      var waitResult = await window.oneclaw.settingsWeixinLoginWait({
+        qrcode: weixinQrcode,
+      });
+      if (!weixinLoginPolling) return;
+      if (waitResult.success && waitResult.data) {
+        if (waitResult.data.connected) {
+          weixinLoginPolling = false;
+          showWeixinConnected(waitResult.data.accountId || "");
+          showToast(t("weixin.connected"));
+          return;
+        }
+        // 根据 status 字段判断状态
+        var status = waitResult.data.status || "";
+        if (status === "expired") {
+          weixinLoginPolling = false;
+          weixinQrcode = null;
+          startWeixinLogin();
+          return;
+        }
+        if (status === "scaned") {
+          if (els.weixinQrStatus) els.weixinQrStatus.textContent = t("weixin.scanned");
+        }
+        // 继续轮询（最少间隔 1 秒，避免紧密循环）
+        setTimeout(pollWeixinLogin, 1000);
+      } else {
+        var errMsg = (waitResult.data && waitResult.data.message) || waitResult.message || t("weixin.loginFailed");
+        showWeixinMsg(errMsg, "error");
+        resetWeixinLoginUI();
+      }
+    } catch (err) {
+      if (weixinLoginPolling) {
+        showWeixinMsg(t("weixin.loginFailed"), "error");
+        resetWeixinLoginUI();
+      }
+    }
+  }
+
+  // 重置微信登录 UI 到初始状态
+  function resetWeixinLoginUI() {
+    weixinLoginPolling = false;
+    weixinQrcode = null;
+    if (els.weixinQrContainer) els.weixinQrContainer.classList.add("hidden");
+    if (els.weixinQrImage) els.weixinQrImage.src = "";
+  }
+
+  // 显示微信已连接状态
+  function showWeixinConnected(accountId) {
+    if (els.weixinQrContainer) els.weixinQrContainer.classList.add("hidden");
+    if (els.weixinConnectedInfo) {
+      els.weixinConnectedInfo.classList.remove("hidden");
+      if (els.weixinAccountId) els.weixinAccountId.textContent = accountId;
+    }
+    if (els.weixinStatusDot) els.weixinStatusDot.classList.add("active");
+  }
+
+  // 清除微信连接（删除账号凭据后重新扫码）
+  async function removeWeixinAccount() {
+    hideWeixinMsg();
+    try {
+      var result = await window.oneclaw.settingsWeixinClearAccounts();
+      if (result.success) {
+        if (els.weixinConnectedInfo) els.weixinConnectedInfo.classList.add("hidden");
+        if (els.weixinStatusDot) els.weixinStatusDot.classList.remove("active");
+        showToast(t("weixin.disconnected"));
+        // 自动重新扫码
+        startWeixinLogin();
+      }
+    } catch (err) {
+      showWeixinMsg(t("error.connection") + (err.message || ""), "error");
+    }
+  }
+
+  // 回填微信配置，恢复已连接状态
+  async function loadWeixinConfig() {
+    try {
+      var result = await window.oneclaw.settingsGetWeixinConfig();
+      if (result.success && result.data) {
+        if (els.weixinEnabled) els.weixinEnabled.checked = result.data.enabled;
+        toggleEl(els.weixinFields, result.data.enabled);
+        if (!result.data.bundled && result.data.enabled) {
+          if (els.weixinNotBundledHint) els.weixinNotBundledHint.classList.remove("hidden");
+        }
+        if (result.data.enabled) {
+          var accounts = result.data.accounts || [];
+          if (accounts.length > 0) {
+            showWeixinConnected(accounts[0]);
+          } else {
+            startWeixinLogin();
+          }
+        }
+      }
+    } catch (err) {
+      // 静默失败
+    }
+  }
+
+
   // ── Advanced ──
 
   // 加载高级配置
@@ -2800,8 +3138,6 @@
       // 回填 browser profile radio
       var radio = document.querySelector('input[name="browserProfile"][value="' + data.browserProfile + '"]');
       if (radio) radio.checked = true;
-      // 回填 session-memory hook toggle
-      els.sessionMemoryEnabled.checked = data.sessionMemoryEnabled !== false;
       // 回填 iMessage toggle
       els.imessageEnabled.checked = !!data.imessageEnabled;
       // 按平台能力展示并回填开机启动开关
@@ -2904,7 +3240,6 @@
     var browserProfile = document.querySelector('input[name="browserProfile"]:checked').value;
     var imessageEnabled = els.imessageEnabled.checked;
     var launchAtLogin = els.launchAtLoginEnabled ? !!els.launchAtLoginEnabled.checked : false;
-    var sessionMemoryEnabled = !!els.sessionMemoryEnabled.checked;
     var clawHubRegistry = els.clawHubRegistry ? els.clawHubRegistry.value.trim() : "";
 
     try {
@@ -2912,7 +3247,6 @@
         browserProfile: browserProfile,
         imessageEnabled: imessageEnabled,
         launchAtLogin: launchAtLogin,
-        sessionMemoryEnabled: sessionMemoryEnabled,
         clawHubRegistry: clawHubRegistry,
       });
       setAdvSaving(false);
@@ -3088,13 +3422,20 @@
 
   // ── Kimi Tab ──
 
-  // 从 install.sh 命令或直接输入解析 bot token
-  function parseBotToken(input) {
-    var match = input.match(/--bot-token\s+(\S+)/);
-    if (match) return match[1];
-    var trimmed = input.trim();
-    if (trimmed && !/\s/.test(trimmed)) return trimmed;
-    return "";
+  // 从粘贴的 install 命令里抽 --bot-token / --ws-url / --kimiapi-host。
+  // 纯 token（无空格）直接当作 botToken；任何一项缺失都返回空串。
+  function parseKimiInstallCommand(input) {
+    var text = typeof input === "string" ? input : "";
+    function pick(flag) {
+      var m = text.match(new RegExp(flag + "\\s+(\\S+)"));
+      return m ? m[1] : "";
+    }
+    var token = pick("--bot-token");
+    if (!token) {
+      var trimmed = text.trim();
+      if (trimmed && !/\s/.test(trimmed)) token = trimmed;
+    }
+    return { botToken: token, wsURL: pick("--ws-url"), kimiapiHost: pick("--kimiapi-host") };
   }
 
   // 掩码 token（保留首尾各 4 字符）
@@ -3131,10 +3472,17 @@
       if (!result.success || !result.data) return;
 
       var data = result.data;
-      // 回填 token 到输入框
       // 回填 token
       if (data.botToken) {
         els.kimiSettingsInput.value = data.botToken;
+      }
+      // 回填高级字段（wsURL/kimiapiHost）。非空就展开 Advanced 折叠块，让用户看到当前生效值。
+      var customWs = typeof data.wsURL === "string" ? data.wsURL : "";
+      var customHost = typeof data.kimiapiHost === "string" ? data.kimiapiHost : "";
+      if (els.kimiBridgeUrlInput) els.kimiBridgeUrlInput.value = customWs;
+      if (els.kimiApiHostInput) els.kimiApiHostInput.value = customHost;
+      if (els.kimiAdvancedWrap && (customWs || customHost)) {
+        els.kimiAdvancedWrap.open = true;
       }
 
       // 回填启用状态
@@ -3171,19 +3519,27 @@
       return;
     }
 
-    // 启用 → 校验 token
-    var botToken = parseBotToken(els.kimiSettingsInput.value);
+    // 启用 → 校验 token + 读高级字段作为 override
+    var parsed = parseKimiInstallCommand(els.kimiSettingsInput.value);
+    var botToken = parsed.botToken;
     if (!botToken) {
       showKimiMsg(t("error.noKimiBotToken"), "error");
       els.kimiEnabled.checked = false;
       return;
     }
+    var wsURLOverride = els.kimiBridgeUrlInput && els.kimiBridgeUrlInput.value.trim();
+    var kimiapiHostOverride = els.kimiApiHostInput && els.kimiApiHostInput.value.trim();
 
     setKimiSaving(true);
     hideKimiMsg();
 
     try {
-      var result = await window.oneclaw.settingsSaveKimiConfig({ botToken: botToken, enabled: true });
+      var result = await window.oneclaw.settingsSaveKimiConfig({
+        botToken: botToken,
+        enabled: true,
+        wsURL: wsURLOverride || "",
+        kimiapiHost: kimiapiHostOverride || "",
+      });
       if (!result.success) {
         showKimiMsg(result.message || "Save failed", "error");
         els.kimiEnabled.checked = false;
@@ -3296,7 +3652,352 @@
     }
   }
 
+  // ── Memory 配置 ──
+
+  var memorySaving = false;
+
+  function showMemoryMsg(msg, type) { showMsg(els.memoryMsgBox, msg, type); }
+  function hideMemoryMsg() { hideMsg(els.memoryMsgBox); }
+  function setMemorySaving(loading) {
+    memorySaving = loading;
+    els.btnMemorySave.disabled = loading;
+    els.btnMemorySaveText.textContent = loading ? t("memory.saving") : t("memory.save");
+    els.btnMemorySaveSpinner.classList.toggle("hidden", !loading);
+  }
+
+  // 加载记忆配置
+  async function loadMemoryConfig() {
+    try {
+      var result = await window.oneclaw.settingsGetMemoryConfig();
+      if (!result.success || !result.data) return;
+      var data = result.data;
+      els.memorySessionEnabled.checked = data.sessionMemoryEnabled !== false;
+      els.memoryEmbeddingEnabled.checked = !!data.embeddingEnabled;
+
+      // embedding 状态信息：开关开且已配置 kimi-code 才显示"已启用"
+      els.memoryEmbeddingStatus.textContent = (data.embeddingEnabled && data.isKimiCodeConfigured)
+        ? t("memory.embeddingActive")
+        : t("memory.embeddingInactive");
+      els.memoryEmbeddingInfo.classList.remove("hidden");
+    } catch (err) {
+      console.error("[Settings] loadMemoryConfig failed:", err);
+    }
+  }
+
+  // 保存记忆配置
+  async function handleMemorySave() {
+    if (memorySaving) return;
+    setMemorySaving(true);
+    hideMemoryMsg();
+    try {
+      var result = await window.oneclaw.settingsSaveMemoryConfig({
+        sessionMemoryEnabled: !!els.memorySessionEnabled.checked,
+        embeddingEnabled: !!els.memoryEmbeddingEnabled.checked,
+      });
+      setMemorySaving(false);
+      if (result.success) {
+        showToast(t("common.saved"));
+        loadMemoryConfig();
+      } else {
+        showMemoryMsg(result.message || "Save failed", "error");
+      }
+    } catch (err) {
+      setMemorySaving(false);
+      showMemoryMsg(t("error.connection") + (err.message || "Unknown error"), "error");
+    }
+  }
+
   // ── 从配置 + 预设合并出模型列表（配置优先，预设补充） ──
+
+  // ── 模型列表面板 ──
+
+  // 从后端拉取已配置模型列表并渲染左侧面板
+  async function renderModelList() {
+    if (!window.oneclaw || !window.oneclaw.settingsGetConfiguredModels) return;
+    try {
+      var result = await window.oneclaw.settingsGetConfiguredModels();
+      if (!result.success || !result.data) return;
+      modelListData = result.data;
+    } catch { return; }
+
+    var container = els.modelList;
+    if (!container) return;
+    container.innerHTML = "";
+
+    modelListData.forEach(function (item) {
+      var div = document.createElement("div");
+      div.className = "model-list-item";
+      if (item.key === editorState.modelKey) {
+        div.classList.add("active");
+      }
+      div.dataset.modelKey = item.key;
+
+      // 左侧信息区
+      var infoDiv = document.createElement("div");
+      infoDiv.className = "model-list-item__info";
+
+      var nameDiv = document.createElement("div");
+      nameDiv.className = "model-list-item__name";
+      nameDiv.textContent = item.name || item.key;
+      infoDiv.appendChild(nameDiv);
+
+      var metaDiv = document.createElement("div");
+      metaDiv.className = "model-list-item__meta";
+      metaDiv.textContent = item.provider;
+      infoDiv.appendChild(metaDiv);
+      div.appendChild(infoDiv);
+
+      // 右侧操作按钮（hover 显示，默认星常亮）
+      var actions = document.createElement("div");
+      actions.className = "model-list-item__actions";
+
+      // 删除
+      var delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "model-list-item__action-btn";
+      delBtn.dataset.tooltip = t("settings.deleteModel");
+      delBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><use href="#icon-trash-2"></use></svg>';
+      if (item.isDefault) delBtn.disabled = true;
+      delBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var sk = item.key.indexOf("/");
+        editorState = { mode: "edit", modelKey: item.key, providerKey: sk > 0 ? item.key.slice(0, sk) : item.key };
+        handleDeleteModel();
+      });
+      actions.appendChild(delBtn);
+
+      // 设为默认（默认模型时星星常亮）
+      var starBtn = document.createElement("button");
+      starBtn.type = "button";
+      starBtn.className = "model-list-item__action-btn" + (item.isDefault ? " is-default" : "");
+      starBtn.dataset.tooltip = t("settings.setDefault");
+      starBtn.innerHTML = item.isDefault
+        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor"><use href="#icon-star"></use></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><use href="#icon-star"></use></svg>';
+      if (item.isDefault) starBtn.disabled = true;
+      starBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var sk = item.key.indexOf("/");
+        editorState = { mode: "edit", modelKey: item.key, providerKey: sk > 0 ? item.key.slice(0, sk) : item.key };
+        handleSetDefault();
+      });
+      actions.appendChild(starBtn);
+
+      div.appendChild(actions);
+
+      div.addEventListener("click", function () {
+        selectModelInList(item.key);
+      });
+      container.appendChild(div);
+    });
+  }
+
+  // 选中列表中的某个模型，进入编辑模式
+  function selectModelInList(modelKey) {
+    var slashIdx0 = modelKey.indexOf("/");
+    editorState = {
+      mode: "edit",
+      modelKey: modelKey,
+      providerKey: slashIdx0 > 0 ? modelKey.slice(0, slashIdx0) : modelKey,
+    };
+    hideMsg();
+
+    // 高亮列表项（placeholder 保留但取消高亮）
+    $$(".model-list-item").forEach(function (el) {
+      el.classList.toggle("active", el.dataset.modelKey === modelKey);
+    });
+
+    // 解析 modelKey → providerKey / modelId
+    var slashIdx = modelKey.indexOf("/");
+    if (slashIdx <= 0) return;
+    var providerKey = modelKey.slice(0, slashIdx);
+    var modelId = modelKey.slice(slashIdx + 1);
+
+    // 从 modelListData 获取元数据
+    var modelEntry = modelListData.find(function (m) { return m.key === modelKey; });
+
+    // providerKey → UI provider tab 映射
+    var uiProvider = resolveUiProvider(providerKey);
+    var subPlatform = resolveSubPlatform(providerKey);
+
+    // 切换到对应 provider（先设子平台，再 switch）
+    if (uiProvider === "moonshot" && subPlatform) {
+      var radio = document.querySelector('input[name="subPlatform"][value="' + subPlatform + '"]');
+      if (radio) radio.checked = true;
+    }
+    if (uiProvider === "custom") {
+      // 检查 customPreset
+      var presetKey = resolveCustomPresetKey(providerKey);
+      if (presetKey) {
+        switchProvider("custom");
+        els.customPreset.value = presetKey;
+        applyCustomPreset(presetKey);
+      } else {
+        switchProvider("custom");
+        els.customPreset.value = "";
+        applyCustomPreset("");
+      }
+    } else {
+      switchProvider(uiProvider);
+    }
+
+    // 锁定 provider tabs
+    lockProviderTabs(uiProvider);
+
+    // 从 savedProviders 回填 apiKey（传入真实 providerKey 避免 lookup 推断失败）
+    fillSavedProviderFields(uiProvider, subPlatform, providerKey);
+
+    // 选中模型
+    selectOrAppendModel(modelId);
+
+    // 显示别名
+    var alias = modelEntry && modelEntry.name !== modelId ? modelEntry.name : "";
+    els.modelAlias.value = alias;
+    toggleEl(els.modelAliasGroup, true);
+
+    els.btnSaveText.textContent = t("provider.save");
+  }
+
+  // 进入新增模式
+  function enterAddMode() {
+    editorState = { mode: "add" };
+    hideMsg();
+
+    // 取消列表高亮
+    $$(".model-list-item").forEach(function (el) {
+      el.classList.remove("active");
+    });
+
+    // 移除旧 placeholder（如有）
+    var oldPlaceholder = document.querySelector(".model-list-item--placeholder");
+    if (oldPlaceholder) oldPlaceholder.remove();
+
+    // 在列表末尾插入未保存模型占位项
+    var container = els.modelList;
+    if (container) {
+      var ph = document.createElement("div");
+      ph.className = "model-list-item model-list-item--placeholder active";
+      var phInfo = document.createElement("div");
+      phInfo.className = "model-list-item__info";
+      var phName = document.createElement("div");
+      phName.className = "model-list-item__name";
+      phName.textContent = t("settings.newModelPlaceholder");
+      phInfo.appendChild(phName);
+      var phMeta = document.createElement("div");
+      phMeta.className = "model-list-item__meta";
+      phMeta.textContent = "—";
+      phInfo.appendChild(phMeta);
+      ph.appendChild(phInfo);
+      // 点击 placeholder 重新激活新增模式
+      ph.addEventListener("click", function () { enterAddMode(); });
+      container.appendChild(ph);
+    }
+
+    // 解锁 provider tabs
+    unlockProviderTabs();
+
+    // 清空表单
+    els.apiKeyInput.value = "";
+    els.modelAlias.value = "";
+    toggleEl(els.modelAliasGroup, true);
+
+    // 重置 OAuth / 用量面板（add 模式时用量不显示，OAuth 登录仍可用）
+    updateOAuthVisibility();
+
+    // 隐藏编辑按钮
+    els.btnSaveText.textContent = t("settings.addModelSave");
+
+    // 回填当前 provider 的已保存配置（保留 apiKey）
+    fillSavedProviderFields(currentProvider);
+  }
+
+  // providerKey → UI tab provider 名
+  function resolveUiProvider(providerKey) {
+    if (providerKey === "kimi-coding" || providerKey === "moonshot") return "moonshot";
+    if (providerKey === "anthropic") return "anthropic";
+    if (providerKey === "openai") return "openai";
+    if (providerKey === "google") return "google";
+    // 所有其他 → custom
+    if (PROVIDERS[providerKey]) return providerKey;
+    return "custom";
+  }
+
+  // providerKey → Moonshot 子平台
+  function resolveSubPlatform(providerKey) {
+    if (providerKey === "kimi-coding") return "kimi-code";
+    if (providerKey === "moonshot") return "moonshot-cn";
+    return null;
+  }
+
+  // providerKey → custom preset key（反查）
+  function resolveCustomPresetKey(providerKey) {
+    for (var key in CUSTOM_PRESETS) {
+      if (CUSTOM_PRESETS[key].providerKey === providerKey) return key;
+    }
+    return null;
+  }
+
+  // 锁定 provider tabs（编辑模式下禁止切换）
+  function lockProviderTabs(activeProvider) {
+    $$(".provider-tab").forEach(function (tab) {
+      if (tab.dataset.provider !== activeProvider) {
+        tab.classList.add("locked");
+        tab.disabled = true;
+      } else {
+        tab.classList.remove("locked");
+        tab.disabled = false;
+      }
+    });
+  }
+
+  // 解锁 provider tabs
+  function unlockProviderTabs() {
+    $$(".provider-tab").forEach(function (tab) {
+      tab.classList.remove("locked");
+      tab.disabled = false;
+    });
+  }
+
+  // 删除模型
+  async function handleDeleteModel() {
+    if (!editorState.modelKey) return;
+    var entry = modelListData.find(function (m) { return m.key === editorState.modelKey; });
+    if (entry && entry.isDefault) {
+      showMsg(t("settings.cannotDeleteDefault"), "error");
+      return;
+    }
+    if (!confirm(t("settings.confirmDelete"))) return;
+    try {
+      var result = await window.oneclaw.settingsDeleteModel({ modelKey: editorState.modelKey });
+      if (!result.success) {
+        showMsg(result.message || "Delete failed", "error");
+        return;
+      }
+      showToast(t("settings.modelDeleted"));
+      enterAddMode();
+      await renderModelList();
+    } catch (err) {
+      showMsg(t("error.connection") + (err.message || ""), "error");
+    }
+  }
+
+  // 设为默认模型
+  async function handleSetDefault() {
+    if (!editorState.modelKey) return;
+    try {
+      var result = await window.oneclaw.settingsSetDefaultModel({ modelKey: editorState.modelKey });
+      if (!result.success) {
+        showMsg(result.message || "Set default failed", "error");
+        return;
+      }
+      showToast(t("settings.defaultModelSet"));
+      await renderModelList();
+      // 刷新编辑态按钮
+      selectModelInList(editorState.modelKey);
+    } catch (err) {
+      showMsg(t("error.connection") + (err.message || ""), "error");
+    }
+  }
 
   function buildMergedModelList(configuredModels, provider, subPlatform) {
     // 以配置中的模型为基础
@@ -3499,6 +4200,7 @@
       loadWecomConfig(),
       loadDingtalkConfig(),
       loadQqbotConfig(),
+      loadWeixinConfig(),
       loadKimiConfig(),
       loadSearchConfig(),
       loadAdvancedConfig(),
@@ -3816,18 +4518,6 @@
   // ── 事件绑定 ──
 
   function bindEvents() {
-    var btnBackToChat = document.getElementById("btnBackToChat");
-    if (btnBackToChat) {
-      btnBackToChat.addEventListener("click", function() {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({ source: 'oneclaw-settings-embed', type: 'navigate-back' }, '*');
-        } else if (window.oneclaw && window.oneclaw.onNavigate) {
-          // Fallback
-          window.oneclaw.openWebUI?.();
-        }
-      });
-    }
-
     // 左侧导航 tab 切换
     els.navItems.forEach(function (item) {
       item.addEventListener("click", function () {
@@ -3884,6 +4574,11 @@
     }
     els.btnToggleKey.addEventListener("click", togglePasswordVisibility);
 
+    // 模型列表：新增按钮
+    if (els.addModelBtn) {
+      els.addModelBtn.addEventListener("click", function () { enterAddMode(); });
+    }
+    // 模型列表：删除按钮
     // 保存
     els.btnSave.addEventListener("click", handleSave);
 
@@ -3898,6 +4593,7 @@
     bindStatusDot(els.dingtalkEnabled, els.dingtalkStatusDot);
     bindStatusDot(els.kimiEnabled, els.kimiStatusDot);
     bindStatusDot(els.qqEnabled, els.qqStatusDot);
+    bindStatusDot(els.weixinEnabled, els.weixinStatusDot);
 
     // 远程控制页二级平台切换
     els.chatPlatformButtons.forEach(function (button) {
@@ -4150,16 +4846,33 @@
       });
     }
 
+    // Weixin tab
+    if (els.weixinEnabled) {
+      els.weixinEnabled.addEventListener("change", function () {
+        handleWeixinSave();
+      });
+    }
+    if (els.btnWeixinRemove) {
+      els.btnWeixinRemove.addEventListener("click", function () {
+        removeWeixinAccount();
+      });
+    }
     // Kimi tab — 启用/禁用切换 + Token 可见性
     els.kimiEnabled.addEventListener("change", function () { handleKimiSave(); });
     els.btnToggleKimiToken.addEventListener("click", togglePasswordVisibility);
     els.kimiSettingsInput.addEventListener("input", function () {
       var raw = els.kimiSettingsInput.value;
-      var token = parseBotToken(raw);
-      // 从命令格式中提取到 token → 替换输入框 + toast 提示
-      if (token && raw.indexOf("--bot-token") !== -1 && raw !== token) {
-        els.kimiSettingsInput.value = token;
-        showToast(t("kimi.tokenParsed") + maskToken(token));
+      var parsed = parseKimiInstallCommand(raw);
+      var isCmd = raw.indexOf("--bot-token") !== -1;
+      // 从命令格式中提取到 token → 同时回填高级字段（ws-url / kimiapi-host）并展开
+      if (parsed.botToken && isCmd && raw !== parsed.botToken) {
+        els.kimiSettingsInput.value = parsed.botToken;
+        if (parsed.wsURL && els.kimiBridgeUrlInput) els.kimiBridgeUrlInput.value = parsed.wsURL;
+        if (parsed.kimiapiHost && els.kimiApiHostInput) els.kimiApiHostInput.value = parsed.kimiapiHost;
+        if (els.kimiAdvancedWrap && (parsed.wsURL || parsed.kimiapiHost)) {
+          els.kimiAdvancedWrap.open = true;
+        }
+        showToast(t("kimi.tokenParsed") + maskToken(parsed.botToken));
       }
     });
     els.kimiBotPageLink.addEventListener("click", function (e) {
@@ -4173,6 +4886,10 @@
     els.searchEnabled.addEventListener("change", function () { toggleEl(els.searchFields, isSearchEnabled()); });
     els.btnToggleSearchKey.addEventListener("click", togglePasswordVisibility);
     els.btnSearchSave.addEventListener("click", handleSearchSave);
+
+    // Memory tab
+    els.btnMemorySave.addEventListener("click", handleMemorySave);
+
     if (els.searchPlatformLink) {
       els.searchPlatformLink.addEventListener("click", function (e) {
         e.preventDefault();
@@ -4237,13 +4954,19 @@
       });
     }
 
-    // About — 检查更新按钮
+    // About — 检查更新按钮（用 _updateMode 区分当前按钮行为）
     var aboutCheckBtn = document.getElementById("aboutCheckUpdate");
     if (aboutCheckBtn) {
       aboutCheckBtn.addEventListener("click", function () {
-        window.oneclaw.checkForUpdates();
-        aboutCheckBtn.textContent = t("about.checking");
-        aboutCheckBtn.disabled = true;
+        if (_updateMode === "download") {
+          window.oneclaw.downloadAndInstallUpdate();
+          startUpdatePoll();
+        } else {
+          window.oneclaw.checkForUpdates();
+          aboutCheckBtn.textContent = t("about.checking");
+          aboutCheckBtn.disabled = true;
+          startUpdatePoll();
+        }
       });
     }
 
@@ -4256,6 +4979,32 @@
   }
 
   // ── About Tab ──
+
+  // 更新按钮当前行为模式: "check" = 检查更新, "download" = 安装并重启
+  var _updateMode = "check";
+  var _updatePollTimer = null;
+
+  // 轮询更新状态（iframe 中 onUpdateState 推送可能不可靠，用主动轮询兜底）
+  function startUpdatePoll() {
+    stopUpdatePoll();
+    _updatePollTimer = setInterval(function () {
+      if (!window.oneclaw || !window.oneclaw.getUpdateState) return;
+      window.oneclaw.getUpdateState().then(function (state) {
+        renderUpdateStatus(state);
+        // 终态停止轮询（hidden = 无更新/已完成，但 downloading 继续轮询）
+        if (state.status === "hidden") {
+          stopUpdatePoll();
+        }
+      }).catch(function () {});
+    }, 500);
+  }
+
+  function stopUpdatePoll() {
+    if (_updatePollTimer) {
+      clearInterval(_updatePollTimer);
+      _updatePollTimer = null;
+    }
+  }
 
   // 加载版本信息和更新状态
   async function loadAboutInfo() {
@@ -4283,46 +5032,67 @@
         statusEl.classList.add("hidden");
         btnEl.textContent = t("about.checkUpdate");
         btnEl.disabled = false;
+        _updateMode = "check";
         break;
       case "available":
         statusEl.classList.remove("hidden");
         statusEl.textContent = t("about.updateAvailable") + " " + (state.version || "");
         btnEl.textContent = t("about.installRestart");
         btnEl.disabled = false;
-        btnEl.onclick = function () { window.oneclaw.downloadAndInstallUpdate(); };
+        _updateMode = "download";
         break;
       case "downloading":
         statusEl.classList.remove("hidden");
         statusEl.textContent = t("about.downloading") + " " + Math.round(state.percent || 0) + "%";
+        btnEl.textContent = t("about.downloading") + "...";
         btnEl.disabled = true;
-        break;
-      case "done":
-        statusEl.classList.remove("hidden");
-        statusEl.textContent = "";
-        btnEl.textContent = t("about.installRestart");
-        btnEl.disabled = false;
-        btnEl.onclick = function () { window.oneclaw.downloadAndInstallUpdate(); };
+        _updateMode = "download";
         break;
       case "failed":
         statusEl.classList.remove("hidden");
         statusEl.textContent = t("about.updateFailed");
         btnEl.textContent = t("about.checkUpdate");
         btnEl.disabled = false;
-        btnEl.onclick = null;
+        _updateMode = "check";
+        stopUpdatePoll();
         break;
       default:
         statusEl.classList.add("hidden");
         btnEl.textContent = t("about.checkUpdate");
         btnEl.disabled = false;
+        _updateMode = "check";
         break;
     }
   }
 
   // ── 初始化 ──
 
+  // 全局 fixed tooltip（不受 overflow 裁切）
+  function initFixedTooltip() {
+    var tip = document.createElement("div");
+    tip.className = "fixed-tooltip";
+    document.body.appendChild(tip);
+
+    document.addEventListener("mouseover", function (e) {
+      var btn = e.target.closest("[data-tooltip]");
+      if (!btn || btn.disabled) { tip.style.opacity = "0"; return; }
+      tip.textContent = btn.getAttribute("data-tooltip");
+      tip.style.opacity = "1";
+      var rect = btn.getBoundingClientRect();
+      tip.style.left = rect.left + rect.width / 2 + "px";
+      tip.style.top = rect.top - 6 + "px";
+    });
+
+    document.addEventListener("mouseout", function (e) {
+      var btn = e.target.closest("[data-tooltip]");
+      if (btn) tip.style.opacity = "0";
+    });
+  }
+
   function init() {
     detectLang();
     applyI18n();
+    initFixedTooltip();
 
     bindEvents();
     switchProvider("moonshot");
@@ -4330,12 +5100,15 @@
     switchChatPlatform(initialChatPlatform || "feishu");
     applyRecoveryNotice(startupNotice);
     loadCurrentConfig();
+    renderModelList();
     loadChannelConfig();
     loadWecomConfig();
     loadDingtalkConfig();
     loadQqbotConfig();
+    loadWeixinConfig();
     loadKimiConfig();
     loadSearchConfig();
+    loadMemoryConfig();
     loadAdvancedConfig();
     loadAppearanceSettings();
     refreshGatewayState();

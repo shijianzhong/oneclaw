@@ -1,14 +1,52 @@
-import { app, ipcMain, session } from "electron";
+import { app, ipcMain, session, shell } from "electron";
+import * as os from "os";
+import { pathToFileURL } from "url";
 import { spawn } from "child_process";
 import {
+  resolveGatewayCwd,
+  resolveGatewayEntry,
+  resolveGatewayPackageDir,
   resolveNodeBin,
   resolveNodeExtraEnv,
-  resolveGatewayEntry,
-  resolveGatewayCwd,
   resolveResourcesPath,
   resolveUserConfigPath,
   resolveUserStateDir,
+  resolveWebbridgeBinaryPath,
+  resolveWebbridgeCrxPath,
+  resolveWebbridgeDataDir,
+  readWebbridgeCrxMetadata,
+  readWebbridgeExtensionId,
 } from "./constants";
+import {
+  applyBrowserModeConfig,
+  BROWSER_TARGETS,
+  cleanExtensionBlocklist,
+  coerceBrowserMode,
+  DEFAULT_PROCESS_EXEC,
+  detectBrowserMode,
+  getBrowserRunningState,
+  getDefaultBrowser,
+  getExtensionStates,
+  installForAllDetectedBrowsers,
+  installForDefaultBrowser,
+  isBrowserInstalled,
+  isExtensionBlocklisted,
+  killBackgroundProcesses,
+  type ExtensionSpec,
+} from "./browser";
+import {
+  migrateBrowserProfileForCurrentGateway,
+  normalizeRequestedBrowserProfileForSave,
+} from "./browser-profile-config";
+import {
+  getWebbridgeInstallState,
+  getWebbridgePrecheck,
+  installWebbridge,
+  installWebbridgeSkill,
+  readCacheManifest,
+  resolveWebbridgeExtensionSpec,
+  runWebbridgeSetupTask,
+} from "./webbridge";
 import { resolveOneclawConfigPath } from "./oneclaw-config";
 import {
   getConfigRecoveryData,
@@ -24,11 +62,12 @@ import {
   verifyQqbot,
   verifyDingtalk,
   buildProviderConfig,
+  deriveCustomConfigKey,
   saveMoonshotConfig,
   readUserConfig,
   writeUserConfig,
 } from "./provider-config";
-import { getLatestShareCopyPayload } from "./share-copy";
+import { SHARE_COPY_PAYLOAD } from "./share-copy";
 import { readSkillStoreRegistry, writeSkillStoreRegistry } from "./skill-store";
 import {
   readChannelAllowFromStoreEntries as readChannelAllowFromStoreEntriesFromFs,
@@ -38,11 +77,13 @@ import {
   extractKimiConfig,
   saveKimiPluginConfig,
   isKimiPluginBundled,
-  DEFAULT_KIMI_BRIDGE_WS_URL,
   extractKimiSearchConfig,
   saveKimiSearchConfig,
   isKimiSearchPluginBundled,
   writeKimiSearchDedicatedApiKey,
+  writeKimiApiKey,
+  readKimiApiKey,
+  ensureMemorySearchProxyConfig,
 } from "./kimi-config";
 import {
   extractQqbotConfig,
@@ -62,10 +103,30 @@ import {
   verifyWecom,
   WECOM_CHANNEL_ID,
 } from "./wecom-config";
-import { ensureGatewayAuthTokenInConfig } from "./gateway-auth";
+import {
+  extractWeixinConfig,
+  ensureWeixinPluginReady,
+  saveWeixinConfig,
+  isWeixinPluginBundled,
+  startWeixinQrLogin,
+  pollWeixinQrStatus,
+  persistWeixinLoginSuccess,
+  listWeixinAccountIds,
+  clearWeixinAccounts,
+} from "./weixin-config";
+import { reconcileExtensionsOnAppLaunch } from "./extension-mirror";
+import {
+  FEISHU_CHANNEL_ID,
+  isFeishuEnabled,
+  setFeishuChannelEnabled,
+} from "./feishu-config";
+import { startAuthProxy, setProxyAccessToken, setProxySearchDedicatedKey, getProxyPort } from "./kimi-auth-proxy";
+import { ensureGatewayAuthTokenInConfig, resolveGatewayAuthToken } from "./gateway-auth";
+import { callGatewayRpc } from "./gateway-rpc";
 import { getLaunchAtLoginState, setLaunchAtLoginEnabled } from "./launch-at-login";
 import { installCli, uninstallCli, getCliStatus } from "./cli-integration";
 import * as analytics from "./analytics";
+import * as log from "./logger";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -85,6 +146,11 @@ export type PairingRequestView = {
 
 export type FeishuPairingRequestView = PairingRequestView;
 
+type FeishuRejectedPairingStore = {
+  version: 1;
+  codes: string[];
+};
+
 type FeishuAuthorizedEntryView = {
   kind: "user" | "group";
   id: string;
@@ -97,33 +163,19 @@ type FeishuAliasStore = {
   groups: Record<string, string>;
 };
 
-const FEISHU_CHANNEL = "feishu";
+const FEISHU_CHANNEL = FEISHU_CHANNEL_ID;
 const WILDCARD_ALLOW_ENTRY = "*";
 const FEISHU_ALIAS_STORE_FILE = "feishu-allowFrom-aliases.json";
 const FEISHU_REJECTED_PAIRING_STORE_FILE = "feishu-rejected-pairing-codes.json";
-const FEISHU_FIRST_PAIRING_WINDOW_FILE = "feishu-first-pairing-window.json";
 const WECOM_REJECTED_PAIRING_STORE_FILE = "wecom-rejected-pairing-codes.json";
-const FEISHU_FIRST_PAIRING_WINDOW_TTL_MS = 10 * 60 * 1000;
 const FEISHU_OPEN_API_BASE = "https://open.feishu.cn/open-apis";
 const FEISHU_TOKEN_SAFETY_MS = 60_000;
-
-type FeishuFirstPairingWindowState = {
-  openedAtMs: number;
-  expiresAtMs: number;
-  consumedAtMs: number | null;
-  consumedBy: string;
-};
 
 type FeishuTenantTokenCache = {
   appId: string;
   appSecret: string;
   token: string;
   expireAt: number;
-};
-
-type FeishuRejectedPairingStore = {
-  version: 1;
-  codes: string[];
 };
 
 let feishuTenantTokenCache: FeishuTenantTokenCache | null = null;
@@ -183,6 +235,7 @@ async function runTrackedSettingsAction<T extends SettingsActionResult>(
 
 interface SettingsIpcOptions {
   requestGatewayRestart?: () => void;
+  getGatewayToken?: () => string;
 }
 
 // 注册 Settings 相关 IPC
@@ -191,6 +244,75 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
   const writeUserConfigAndRestart: typeof writeUserConfig = (config) => {
     writeUserConfig(config);
     opts.requestGatewayRestart?.();
+  };
+  // 读取 openclaw.json 中 kimi-webbridge skill 的 enabled 字段（webbridge-precheck 用）。
+  // 用户可以单独 disable/enable 该 skill，跟 browser.defaultProfile 是两条独立的开关；
+  // 触发 Settings → 高级"需要修复"banner，修复时 applyBrowserModeConfig 会改回 true。
+  const readKimiWebbridgeSkillEnabled = (): boolean | undefined => {
+    try {
+      const cfg = readUserConfig();
+      return cfg?.skills?.entries?.["kimi-webbridge"]?.enabled;
+    } catch {
+      return undefined;
+    }
+  };
+  // 当前浏览器模式（来自 detectBrowserMode）。precheck 用它区分：
+  //   webbridge + enabled=false = 漂移（要修复）
+  //   非 webbridge + enabled=false = 切换前的初始状态（不算漂移）
+  const getCurrentBrowserMode = (): "webbridge" | "openclaw" | "user" => {
+    try {
+      return detectBrowserMode(readUserConfig());
+    } catch {
+      return "openclaw";
+    }
+  };
+  const specFromExtId = (extId: string): ExtensionSpec => {
+    const meta = readWebbridgeCrxMetadata();
+    return {
+      extId,
+      crxPath: resolveWebbridgeCrxPath(),
+      crxVersion: meta?.version ?? "",
+    };
+  };
+  // 在用户的默认浏览器里打开 enable-guide 页面（修复成功且扩展刚装上时调用）。
+  // setup/webbridge-enable-guide.html 在 packaged 时被打进 app.asar，shell.openExternal
+  // 不能直接打开 asar 内的文件，所以先读出来写到系统临时目录，再用 file:// 打开。
+  // ?lang=zh|en, ?browser=chrome|edge —— 让 enable-guide 显示对应的语言和浏览器图标。
+  //
+  // 必须 await openExternal 并返回真实结果：
+  //   - Win 路径形如 `C:\Users\...` 用字符串拼接 `file://${tempPath}` 不是合法 URL，
+  //     pathToFileURL() 才能正确处理盘符 + 反斜杠 + URL 编码
+  //   - openExternal 是 Promise；fire-and-forget 让"打开失败"也被当成 success，
+  //     调用方据此跳过 modal，结果就是用户既看不到引导页也看不到本地提示
+  const openWebbridgeEnableGuideInBrowser = async (): Promise<boolean> => {
+    try {
+      const sourcePath = path.join(
+        __dirname,
+        "..",
+        "setup",
+        "webbridge-enable-guide.html",
+      );
+      const tempPath = path.join(
+        os.tmpdir(),
+        "oneclaw-webbridge-enable-guide.html",
+      );
+      const content = fs.readFileSync(sourcePath, "utf-8");
+      fs.writeFileSync(tempPath, content, "utf-8");
+      const lang = app.getLocale().toLowerCase().startsWith("zh") ? "zh" : "en";
+      const def = await getDefaultBrowser();
+      const browserParam =
+        def?.target.id === "edge" ? "edge" : def?.target.id === "chrome" ? "chrome" : "";
+      const url = pathToFileURL(tempPath);
+      url.searchParams.set("lang", lang);
+      if (browserParam) url.searchParams.set("browser", browserParam);
+      await shell.openExternal(url.toString());
+      return true;
+    } catch (err) {
+      log.error(
+        `[webbridge] open enable-guide failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   };
   // ── 读取当前 provider/model 配置（apiKey 掩码返回） ──
   ipcMain.handle("settings:get-config", async () => {
@@ -202,30 +324,186 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     }
   });
 
-  // ── 验证 API Key（复用 provider-config） ──
-  ipcMain.handle("settings:verify-key", async (_event, params) => {
-    const provider = typeof params?.provider === "string" ? params.provider : "";
-    return runTrackedSettingsAction("verify_key", { provider }, async () => verifyProvider(params));
-  });
-
-  // ── 读取最新分享文案（服务端维护中英文版本） ──
-  ipcMain.handle("settings:get-share-copy", async () => {
+  // ── 聚合所有 provider 的已配置模型列表 ──
+  ipcMain.handle("settings:get-configured-models", async () => {
     try {
-      return {
-        success: true,
-        data: await getLatestShareCopyPayload(),
-      };
+      const config = readUserConfig();
+      const providers = config?.models?.providers ?? {};
+      const primary: string = config?.agents?.defaults?.model?.primary ?? "";
+      const result: Array<{ key: string; name: string; provider: string; isDefault: boolean }> = [];
+
+      for (const [providerKey, prov] of Object.entries(providers)) {
+        if (!prov || typeof prov !== "object") continue;
+        const models = (prov as any).models;
+        if (!Array.isArray(models)) continue;
+        for (const m of models) {
+          const id = typeof m === "string" ? m : m?.id;
+          if (!id) continue;
+          const modelKey = `${providerKey}/${id}`;
+          const name = typeof m === "object" ? (m.name || id) : id;
+          // custom-xxx key 用 baseUrl hostname 做显示名，更可读
+          let displayProvider = providerKey;
+          if (providerKey.startsWith("custom-") && (prov as any).baseUrl) {
+            try { displayProvider = new URL((prov as any).baseUrl).hostname; } catch {}
+          }
+          result.push({
+            key: modelKey,
+            name,
+            provider: displayProvider,
+            isDefault: modelKey === primary,
+          });
+        }
+      }
+      return { success: true, data: result };
     } catch (err: any) {
-      return {
-        success: false,
-        message: err.message || String(err),
-      };
+      return { success: false, message: err.message };
     }
   });
 
+  // ── 删除指定模型（禁止删除默认模型） ──
+  ipcMain.handle("settings:delete-model", async (_event, params) => {
+    const modelKey = typeof params?.modelKey === "string" ? params.modelKey : "";
+    return runTrackedSettingsAction("delete_model" as any, { model_key: modelKey }, async () => {
+      try {
+        const config = readUserConfig();
+        const primary: string = config?.agents?.defaults?.model?.primary ?? "";
+        if (modelKey === primary) {
+          return { success: false, message: "不能删除当前默认模型" };
+        }
+
+        const slashIdx = modelKey.indexOf("/");
+        if (slashIdx <= 0) {
+          return { success: false, message: "无效的 modelKey 格式" };
+        }
+        const providerKey = modelKey.slice(0, slashIdx);
+        const modelId = modelKey.slice(slashIdx + 1);
+
+        config.models ??= {};
+        config.models.providers ??= {};
+        const prov = config.models.providers[providerKey];
+        if (!prov || !Array.isArray(prov.models)) {
+          return { success: false, message: "模型不存在" };
+        }
+
+        prov.models = prov.models.filter((m: any) => {
+          const id = typeof m === "string" ? m : m?.id;
+          return id !== modelId;
+        });
+
+        // provider 下无模型时移除整个 provider
+        if (prov.models.length === 0) {
+          delete config.models.providers[providerKey];
+        }
+
+        writeUserConfigAndRestart(config);
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err.message || String(err) };
+      }
+    });
+  });
+
+  // ── 设置默认模型 ──
+  ipcMain.handle("settings:set-default-model", async (_event, params) => {
+    const modelKey = typeof params?.modelKey === "string" ? params.modelKey : "";
+    return runTrackedSettingsAction("set_default_model" as any, { model_key: modelKey }, async () => {
+      try {
+        const config = readUserConfig();
+        // 验证目标模型确实存在
+        const slashIdx = modelKey.indexOf("/");
+        if (slashIdx <= 0) {
+          return { success: false, message: "无效的 modelKey 格式" };
+        }
+        const providerKey = modelKey.slice(0, slashIdx);
+        const modelId = modelKey.slice(slashIdx + 1);
+        const prov = config?.models?.providers?.[providerKey];
+        if (!prov || !Array.isArray(prov.models)) {
+          return { success: false, message: "模型不存在" };
+        }
+        const found = prov.models.some((m: any) => (typeof m === "string" ? m : m?.id) === modelId);
+        if (!found) {
+          return { success: false, message: "模型不存在" };
+        }
+
+        config.agents ??= {};
+        config.agents.defaults ??= {};
+        config.agents.defaults.model ??= {};
+        config.agents.defaults.model.primary = modelKey;
+
+        writeUserConfigAndRestart(config);
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err.message || String(err) };
+      }
+    });
+  });
+
+  // ── 更新模型别名（不重启 gateway） ──
+  ipcMain.handle("settings:update-model-alias", async (_event, params) => {
+    const modelKey = typeof params?.modelKey === "string" ? params.modelKey : "";
+    const alias = typeof params?.alias === "string" ? params.alias : "";
+    return runTrackedSettingsAction("update_model_alias" as any, { model_key: modelKey }, async () => {
+      try {
+        const slashIdx = modelKey.indexOf("/");
+        if (slashIdx <= 0) {
+          return { success: false, message: "无效的 modelKey 格式" };
+        }
+        const providerKey = modelKey.slice(0, slashIdx);
+        const modelId = modelKey.slice(slashIdx + 1);
+
+        const config = readUserConfig();
+        const prov = config?.models?.providers?.[providerKey];
+        if (!prov || !Array.isArray(prov.models)) {
+          return { success: false, message: "模型不存在" };
+        }
+
+        const idx = prov.models.findIndex((m: any) => {
+          const id = typeof m === "string" ? m : m?.id;
+          return id === modelId;
+        });
+        if (idx < 0) {
+          return { success: false, message: "模型不存在" };
+        }
+        // 字符串条目升级为对象格式
+        let entry = prov.models[idx];
+        if (typeof entry === "string") {
+          entry = { id: entry, name: entry, input: ["text"] };
+          prov.models[idx] = entry;
+        }
+        // name 是 gateway schema 必填字段，空别名时回退到 id
+        entry.name = alias || entry.id;
+
+        writeUserConfig(config);
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err.message || String(err) };
+      }
+    });
+  });
+
+  // ── 验证 API Key（复用 provider-config） ──
+  ipcMain.handle("settings:verify-key", async (_event, params) => {
+    const provider = typeof params?.provider === "string" ? params.provider : "";
+    // kimi-code 验证前：确保 proxy 已启动并持有最新 token
+    if (params?.subPlatform === "kimi-code" && params?.apiKey) {
+      if (getProxyPort() <= 0) {
+        await startAuthProxy();
+      }
+      setProxyAccessToken(params.apiKey);
+    }
+    return runTrackedSettingsAction("verify_key", { provider }, async () =>
+      verifyProvider({ ...params, proxyPort: getProxyPort() }));
+  });
+
+  // ── 读取分享文案（内嵌，跟随客户端版本发布） ──
+  ipcMain.handle("settings:get-share-copy", () => ({
+    success: true,
+    data: SHARE_COPY_PAYLOAD,
+  }));
+
   // ── 保存 provider 配置 ──
   ipcMain.handle("settings:save-provider", async (_event, params) => {
-    const { provider, apiKey, modelID, baseURL, api, subPlatform, supportImage, customPreset } = params;
+    const { provider, apiKey, modelID, baseURL, api, subPlatform, supportImage, customPreset, setAsDefault, modelAlias, action, modelKey, keepProxyAuth } = params;
     const trackedProps = {
       provider,
       model: modelID,
@@ -243,32 +521,191 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
         config.agents.defaults ??= {};
         config.agents.defaults.model ??= {};
 
-        if (provider === "moonshot") {
-          // 记住现有 models 再写入（saveMoonshotConfig 会覆盖）
-          const sub = MOONSHOT_SUB_PLATFORMS[subPlatform || "moonshot-cn"];
-          const provKey = sub?.providerKey || "moonshot";
-          const prevModels: any[] = config.models.providers[provKey]?.models ?? [];
+        if (action === "update" && modelKey) {
+          // === 精确更新，不覆写 ===
+          const slashIdx = modelKey.indexOf("/");
+          if (slashIdx <= 0) throw new Error(`Invalid modelKey: ${modelKey}`);
+          const providerKey = modelKey.slice(0, slashIdx);
+          const modelId = modelKey.slice(slashIdx + 1);
+          const prov = config.models.providers[providerKey];
+          if (!prov) throw new Error(`Provider not found: ${providerKey}`);
 
-          saveMoonshotConfig(config, apiKey, modelID, subPlatform);
+          // 只更新变更的 provider 级字段（keepProxyAuth 时不覆写）
+          if (!keepProxyAuth) {
+            if (apiKey && apiKey !== prov.apiKey) prov.apiKey = apiKey;
+            if (baseURL && baseURL !== prov.baseUrl) prov.baseUrl = baseURL;
+            if (api && api !== prov.api) prov.api = api;
 
-          // 合并：保留已有模型，确保选中模型在列表中
-          mergeModels(config.models.providers[provKey], modelID, prevModels);
+            // 代理模式：将真实 key 存 sidecar，config 中写占位符
+            if (subPlatform === "kimi-code" && getProxyPort() > 0) {
+              writeKimiApiKey(apiKey);
+              setProxyAccessToken(apiKey);
+              prov.apiKey = "proxy-managed";
+              prov.baseUrl = `http://127.0.0.1:${getProxyPort()}/coding`;
+            }
+          }
+
+          // 原地更新模型 entry
+          if (Array.isArray(prov.models)) {
+            const modelIdx = prov.models.findIndex((m: any) => {
+              const id = typeof m === "string" ? m : m?.id;
+              return id === modelId;
+            });
+            if (modelIdx >= 0) {
+              let entry = prov.models[modelIdx];
+              if (typeof entry === "string") {
+                entry = { id: entry, name: entry, input: ["text"] };
+                prov.models[modelIdx] = entry;
+              }
+              if (supportImage !== undefined) {
+                entry.input = supportImage ? ["text", "image"] : ["text"];
+              }
+            }
+          }
+
+          // 应用别名
+          applyModelAlias(prov, modelId, modelAlias);
+
+          // 编辑模式保持默认
+          if (setAsDefault === true) {
+            config.agents.defaults.model.primary = modelKey;
+          }
+        } else if (action === "add") {
+          // === 新增模型 ===
+          if (provider === "moonshot") {
+            // Moonshot 路径：使用 saveMoonshotConfig 创建/更新 provider
+            const sub = MOONSHOT_SUB_PLATFORMS[subPlatform || "moonshot-cn"];
+            const provKey = sub?.providerKey || "moonshot";
+            const existingProv = config.models.providers[provKey];
+
+            if (existingProv) {
+              const existingModels = Array.isArray(existingProv.models) ? existingProv.models : [];
+              const hasModel = existingModels.some((m: any) => {
+                const id = typeof m === "string" ? m : m?.id;
+                return id === modelID;
+              });
+              if (hasModel) {
+                return { success: false, message: `模型已存在: ${provKey}/${modelID}` };
+              }
+              if (!keepProxyAuth) {
+                existingProv.apiKey = apiKey;
+                if (sub) {
+                  existingProv.baseUrl = sub.baseUrl;
+                  existingProv.api = sub.api;
+                }
+              }
+              if (!Array.isArray(existingProv.models)) existingProv.models = [];
+              existingProv.models.push({ id: modelID, name: modelID, input: ["text", "image"] });
+            } else {
+              // provider 不存在 → 用 saveMoonshotConfig 创建
+              const prevPrimary = config.agents.defaults.model.primary;
+              saveMoonshotConfig(config, apiKey, modelID, subPlatform);
+              // 恢复 primary（add 模式不切换默认）
+              if (prevPrimary) {
+                config.agents.defaults.model.primary = prevPrimary;
+              }
+            }
+
+            // 代理模式：将真实 key 存 sidecar，config 中写占位符
+            // keepProxyAuth 时代理已就绪，不重写 token
+            if (subPlatform === "kimi-code" && getProxyPort() > 0 && !keepProxyAuth) {
+              writeKimiApiKey(apiKey);
+              setProxyAccessToken(apiKey);
+              const provKeyProxy = sub?.providerKey || "kimi-coding";
+              if (config.models.providers[provKeyProxy]) {
+                config.models.providers[provKeyProxy].apiKey = "proxy-managed";
+                config.models.providers[provKeyProxy].baseUrl = `http://127.0.0.1:${getProxyPort()}/coding`;
+              }
+            }
+
+            // 应用别名
+            applyModelAlias(config.models.providers[provKey], modelID, modelAlias);
+
+            // 明确 setAsDefault 时才设默认
+            if (setAsDefault === true) {
+              config.agents.defaults.model.primary = `${provKey}/${modelID}`;
+            }
+          } else {
+            // 非 Moonshot：解析 configKey
+            const customPre = customPreset ? CUSTOM_PROVIDER_PRESETS[customPreset] : undefined;
+            const configKey = customPre
+              ? customPre.providerKey
+              : (provider === "custom" && baseURL) ? deriveCustomConfigKey(baseURL) : provider;
+            const existingProv = config.models.providers[configKey];
+
+            if (existingProv) {
+              const existingModels = Array.isArray(existingProv.models) ? existingProv.models : [];
+              const hasModel = existingModels.some((m: any) => {
+                const id = typeof m === "string" ? m : m?.id;
+                return id === modelID;
+              });
+              if (hasModel) {
+                return { success: false, message: `模型已存在: ${configKey}/${modelID}` };
+              }
+              existingProv.apiKey = apiKey;
+              if (!Array.isArray(existingProv.models)) existingProv.models = [];
+              const input = supportImage !== false ? ["text", "image"] : ["text"];
+              existingProv.models.push({ id: modelID, name: modelID, input });
+            } else {
+              // provider 不存在 → 创建新 provider entry
+              config.models.providers[configKey] = buildProviderConfig(provider, apiKey, modelID, baseURL, api, supportImage, customPreset);
+            }
+
+            // 应用别名
+            applyModelAlias(config.models.providers[configKey], modelID, modelAlias);
+
+            // 明确 setAsDefault 时才设默认
+            if (setAsDefault === true) {
+              config.agents.defaults.model.primary = `${configKey}/${modelID}`;
+            }
+          }
         } else {
-          // 内置预设命中时，使用预设的 providerKey 作为配置键
-          const customPre = customPreset ? CUSTOM_PROVIDER_PRESETS[customPreset] : undefined;
-          const configKey = customPre ? customPre.providerKey : provider;
-          const prevModels: any[] = config.models.providers[configKey]?.models ?? [];
+          // === 兼容旧调用（无 action 字段）：走旧逻辑 ===
+          if (provider === "moonshot") {
+            const sub = MOONSHOT_SUB_PLATFORMS[subPlatform || "moonshot-cn"];
+            const provKey = sub?.providerKey || "moonshot";
+            const prevModels: any[] = config.models.providers[provKey]?.models ?? [];
 
-          const providerConfig = buildProviderConfig(provider, apiKey, modelID, baseURL, api, supportImage, customPreset);
-          config.models.providers[configKey] = providerConfig;
-          config.agents.defaults.model.primary = `${configKey}/${modelID}`;
+            const prevPrimary = config.agents.defaults.model.primary;
+            saveMoonshotConfig(config, apiKey, modelID, subPlatform);
 
-          mergeModels(config.models.providers[configKey], modelID, prevModels);
+            if (setAsDefault === false && prevPrimary) {
+              config.agents.defaults.model.primary = prevPrimary;
+            }
+
+            if (subPlatform === "kimi-code" && getProxyPort() > 0) {
+              writeKimiApiKey(apiKey);
+              setProxyAccessToken(apiKey);
+              const provKeyProxy = sub?.providerKey || "kimi-coding";
+              config.models.providers[provKeyProxy].apiKey = "proxy-managed";
+              config.models.providers[provKeyProxy].baseUrl = `http://127.0.0.1:${getProxyPort()}/coding`;
+            }
+
+            mergeModels(config.models.providers[provKey], modelID, prevModels);
+            applyModelAlias(config.models.providers[provKey], modelID, modelAlias);
+          } else {
+            const customPre = customPreset ? CUSTOM_PROVIDER_PRESETS[customPreset] : undefined;
+            const configKey = customPre
+              ? customPre.providerKey
+              : (provider === "custom" && baseURL) ? deriveCustomConfigKey(baseURL) : provider;
+            const prevModels: any[] = config.models.providers[configKey]?.models ?? [];
+
+            const providerConfig = buildProviderConfig(provider, apiKey, modelID, baseURL, api, supportImage, customPreset);
+            config.models.providers[configKey] = providerConfig;
+
+            if (setAsDefault !== false) {
+              config.agents.defaults.model.primary = `${configKey}/${modelID}`;
+            }
+
+            mergeModels(config.models.providers[configKey], modelID, prevModels);
+            applyModelAlias(config.models.providers[configKey], modelID, modelAlias);
+          }
         }
 
-        // 配置 kimi-code 时自动启用搜索插件
+        // 配置 kimi-code 时自动启用搜索插件 + 记忆搜索 embedding
         if (provider === "moonshot" && subPlatform === "kimi-code") {
           saveKimiSearchConfig(config, { enabled: true });
+          ensureMemorySearchProxyConfig(config, getProxyPort());
         }
 
         writeUserConfigAndRestart(config);
@@ -284,8 +721,8 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     try {
       const config = readUserConfig();
       const feishu = config?.channels?.feishu ?? {};
-      const enabled = config?.plugins?.entries?.feishu?.enabled === true;
-      const dmPolicy = normalizeDmPolicy(feishu?.dmPolicy, "pairing");
+      const enabled = isFeishuEnabled(config);
+      const dmPolicy = normalizeDmPolicy(feishu?.dmPolicy, "open");
       const allowFrom = normalizeAllowFromEntries(feishu?.allowFrom);
       const dmPolicyOpen = dmPolicy === "open" || allowFrom.includes(WILDCARD_ALLOW_ENTRY);
       const dmScope = normalizeDmScope(config?.session?.dmScope, "main");
@@ -316,7 +753,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     const { appId, appSecret, enabled } = params;
     const dmPolicy = normalizeDmPolicy(
       params?.dmPolicy,
-      params?.dmPolicyOpen === true ? "open" : "pairing"
+      params?.dmPolicyOpen === false ? "pairing" : "open"
     );
     const dmScopeInput = params?.dmScope;
     const groupPolicy = normalizeGroupPolicy(params?.groupPolicy, "allowlist");
@@ -340,15 +777,11 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
           dmScopeInput,
           normalizeDmScope(config?.session?.dmScope, "main")
         );
-        config.plugins ??= {};
-        config.plugins.entries ??= {};
 
         // 仅禁用 → 不校验凭据
         if (enabled === false) {
-          config.plugins.entries.feishu = { ...(config.plugins.entries.feishu ?? {}), enabled: false };
+          setFeishuChannelEnabled(config, false);
           writeUserConfigAndRestart(config);
-          // 禁用飞书时关闭“首配自动批准”窗口，但保留已消费标记，防止重复自动批准。
-          closeFeishuFirstPairingWindow();
           return { success: true };
         }
 
@@ -359,7 +792,6 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
           return { success: false, message: err.message || "飞书凭据验证失败" };
         }
 
-        config.plugins.entries.feishu = { enabled: true };
         config.channels ??= {};
         // 保留已有飞书策略字段，避免每次保存凭据都把 dmPolicy/allowFrom 覆盖丢失
         const prevFeishu =
@@ -371,6 +803,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
           appId,
           appSecret,
         };
+        setFeishuChannelEnabled(config, true);
 
         const currentAllowFrom = normalizeAllowFromEntries(config.channels.feishu.allowFrom);
         const allowFromWithoutWildcard = currentAllowFrom.filter((entry) => entry !== WILDCARD_ALLOW_ENTRY);
@@ -407,8 +840,6 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
           config.session.dmScope = dmScope;
         }
         writeUserConfigAndRestart(config);
-        // 保存完成后按当前策略维护首配窗口，确保仅在 pairing 且无授权用户时才开启。
-        reconcileFeishuFirstPairingWindow(config);
         return { success: true };
       } catch (err: any) {
         return { success: false, message: err.message || String(err) };
@@ -438,7 +869,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     if (!app.isPackaged) {
       return `开发模式未检测到企业微信插件，请先运行 npm run package:resources（当前目标：${process.platform}-${process.arch}）。`;
     }
-    return "企业微信插件组件缺失，请重新安装 OneClaw。";
+    return "企业微信插件组件缺失，请遵循插件文档指引进行安装。";
   }
 
   ipcMain.handle("settings:get-qqbot-config", async () => {
@@ -463,7 +894,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     const enabled = params?.enabled === true;
     const appId = typeof params?.appId === "string" ? params.appId.trim() : "";
     const clientSecret = typeof params?.clientSecret === "string" ? params.clientSecret.trim() : "";
-    const markdownSupport = params?.markdownSupport !== false;
+    const markdownSupport = params?.markdownSupport === true;
     return runTrackedSettingsAction(
       "save_channel",
       { platform: "qqbot", enabled, markdown_support: markdownSupport },
@@ -662,7 +1093,8 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     );
   });
 
-  // ── 列出企业微信待审批配对请求（走 openclaw pairing list） ──
+  // ── 列出企业微信已授权用户与群聊 ──
+  // ── 列出企业微信待审批配对请求（按需 spawn `openclaw pairing list`） ──
   ipcMain.handle("settings:list-wecom-pairing", async () => {
     const listed = await listWecomPairingRequests();
     return {
@@ -672,7 +1104,16 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     };
   });
 
-  // ── 列出企业微信已授权用户与群聊 ──
+  // ── 批准企业微信配对请求 ──
+  ipcMain.handle("settings:approve-wecom-pairing", async (_event, params) => {
+    return approveWecomPairingRequest(params);
+  });
+
+  // ── 拒绝企业微信配对请求（本地 sidecar 忽略） ──
+  ipcMain.handle("settings:reject-wecom-pairing", async (_event, params) => {
+    return rejectWecomPairingRequest(params);
+  });
+
   ipcMain.handle("settings:list-wecom-approved", async () => {
     try {
       const config = readUserConfig();
@@ -691,14 +1132,56 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     }
   });
 
-  // ── 批准企业微信配对请求（走 openclaw pairing approve） ──
-  ipcMain.handle("settings:approve-wecom-pairing", async (_event, params) => {
-    return approveWecomPairingRequest(params);
+  // ── 添加企业微信用户白名单条目 ──
+  ipcMain.handle("settings:add-wecom-user-allow-from", async (_event, params) => {
+    const id = typeof params?.id === "string" ? params.id.trim() : "";
+    if (!id) {
+      return { success: false, message: "用户 ID 不能为空。" };
+    }
+
+    try {
+      const config = readUserConfig();
+      config.channels ??= {};
+      config.channels[WECOM_CHANNEL_ID] ??= {};
+      const currentAllowFrom = normalizeAllowFromEntries(config.channels[WECOM_CHANNEL_ID].allowFrom)
+        .filter((entry) => entry !== WILDCARD_ALLOW_ENTRY);
+      const nextAllowFrom = dedupeEntries([...currentAllowFrom, id]);
+      if (nextAllowFrom.length > 0) {
+        config.channels[WECOM_CHANNEL_ID].allowFrom = nextAllowFrom;
+      }
+      const nextStoreAllowFrom = dedupeEntries([
+        ...readChannelAllowFromStore(WECOM_CHANNEL_ID),
+        id,
+      ]);
+      writeChannelAllowFromStore(WECOM_CHANNEL_ID, nextStoreAllowFrom);
+      writeUserConfigAndRestart(config);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
   });
 
-  // ── 拒绝企业微信配对请求（本地忽略 pairing code） ──
-  ipcMain.handle("settings:reject-wecom-pairing", async (_event, params) => {
-    return rejectWecomPairingRequest(params);
+  // ── 添加企业微信群白名单条目 ──
+  ipcMain.handle("settings:add-wecom-group-allow-from", async (_event, params) => {
+    const id = typeof params?.id === "string" ? params.id.trim() : "";
+    if (!id) {
+      return { success: false, message: "群 ID 不能为空。" };
+    }
+
+    try {
+      const config = readUserConfig();
+      config.channels ??= {};
+      config.channels[WECOM_CHANNEL_ID] ??= {};
+      const nextGroupAllowFrom = dedupeEntries([
+        ...normalizeAllowFromEntries(config.channels[WECOM_CHANNEL_ID].groupAllowFrom),
+        id,
+      ]);
+      config.channels[WECOM_CHANNEL_ID].groupAllowFrom = nextGroupAllowFrom;
+      writeUserConfigAndRestart(config);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
   });
 
   // ── 删除企业微信已授权用户/群聊 ──
@@ -737,16 +1220,138 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     }
   });
 
-  // ── 列出飞书待审批配对请求（走 openclaw pairing list，避免重复实现存储协议） ──
-  ipcMain.handle("settings:list-feishu-pairing", async () => {
-    const listed = await listFeishuPairingRequests();
-    if (!listed.success) {
-      return { success: false, message: listed.message || "读取飞书待审批列表失败" };
+  // ── 读取微信配置 ──
+  ipcMain.handle("settings:get-weixin-config", async () => {
+    try {
+      const config = readUserConfig();
+      const extracted = extractWeixinConfig(config);
+      const accounts = listWeixinAccountIds();
+      return {
+        success: true,
+        data: {
+          ...extracted,
+          bundled: isWeixinPluginBundled(),
+          accounts,
+        },
+      };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
     }
-    return { success: true, data: { requests: listed.requests } };
+  });
+
+  // ── 保存微信配置（仅 enabled 开关） ──
+  ipcMain.handle("settings:save-weixin-config", async (_event, params) => {
+    const enabled = params?.enabled === true;
+    return runTrackedSettingsAction(
+      "save_channel",
+      { platform: "weixin", enabled },
+      async () => {
+        try {
+          if (enabled) {
+            await ensureWeixinPluginReady(reconcileExtensionsOnAppLaunch);
+          }
+          const config = readUserConfig();
+          saveWeixinConfig(config, { enabled });
+          writeUserConfigAndRestart(config);
+          return { success: true };
+        } catch (err: any) {
+          return { success: false, message: err.message || String(err) };
+        }
+      },
+    );
+  });
+
+  // ── 微信扫码登录 — 启动（直接调用 iLink HTTP API，绕过 Gateway RPC） ──
+  ipcMain.handle("settings:weixin-login-start", async () => {
+    try {
+      const result = await startWeixinQrLogin();
+      return {
+        success: true,
+        data: {
+          qrDataUrl: result.qrcodeUrl,
+          qrcode: result.qrcode,
+          message: result.message,
+        },
+      };
+    } catch (err: any) {
+      console.error("[weixin] login-start error:", err.message);
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── 微信扫码登录 — 轮询扫码结果（直接调用 iLink HTTP API） ──
+  ipcMain.handle("settings:weixin-login-wait", async (_event, params) => {
+    try {
+      const qrcode = typeof params?.qrcode === "string" ? params.qrcode : "";
+      if (!qrcode) {
+        return { success: false, message: "缺少 qrcode。" };
+      }
+      const result = await pollWeixinQrStatus(qrcode);
+
+      // 扫码确认成功 → 保存凭据并重启 Gateway
+      if (result.status === "confirmed" && result.accountId && result.botToken) {
+        await ensureWeixinPluginReady(reconcileExtensionsOnAppLaunch);
+        const config = readUserConfig();
+        const normalizedId = persistWeixinLoginSuccess(config, result);
+        writeUserConfigAndRestart(config);
+        return {
+          success: true,
+          data: {
+            connected: true,
+            message: "✅ 与微信连接成功！",
+            accountId: normalizedId,
+          },
+        };
+      }
+
+      return {
+        success: true,
+        data: {
+          connected: false,
+          status: result.status,
+          message:
+            result.status === "scaned" ? "已扫码，请在微信中确认…" :
+            result.status === "expired" ? "二维码已过期，请重新生成。" :
+            "等待扫码…",
+        },
+      };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── 清除微信账号（断开连接） ──
+  ipcMain.handle("settings:weixin-clear-accounts", async () => {
+    try {
+      clearWeixinAccounts();
+      opts.requestGatewayRestart?.();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
   });
 
   // ── 列出飞书已授权列表（用户 + 群聊，优先展示可读名称） ──
+  // ── 列出飞书待审批配对请求（按需 spawn `openclaw pairing list`） ──
+  ipcMain.handle("settings:list-feishu-pairing", async () => {
+    const listed = await listFeishuPairingRequests();
+    return {
+      success: listed.success,
+      data: listed.success ? { requests: listed.requests } : undefined,
+      message: listed.message,
+    };
+  });
+
+  // ── 批准飞书配对请求 ──
+  ipcMain.handle("settings:approve-feishu-pairing", async (_event, params) => {
+    return approveFeishuPairingRequest(params);
+  });
+
+  // ── 拒绝飞书配对请求（本地 sidecar 忽略） ──
+  ipcMain.handle("settings:reject-feishu-pairing", async (_event, params) => {
+    return rejectFeishuPairingRequest(params);
+  });
+
   ipcMain.handle("settings:list-feishu-approved", async () => {
     try {
       const config = readUserConfig();
@@ -773,16 +1378,6 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     }
   });
 
-  // ── 批准飞书配对请求（走 openclaw pairing approve，统一写入 allowlist store） ──
-  ipcMain.handle("settings:approve-feishu-pairing", async (_event, params) => {
-    return approveFeishuPairingRequest(params);
-  });
-
-  // ── 拒绝飞书配对请求（openclaw 暂无 reject 命令，使用本地 sidecar 忽略该 pairing code） ──
-  ipcMain.handle("settings:reject-feishu-pairing", async (_event, params) => {
-    return rejectFeishuPairingRequest(params);
-  });
-
   // ── 添加群聊白名单条目（仅允许群 ID） ──
   ipcMain.handle("settings:add-feishu-group-allow-from", async (_event, params) => {
     const id = String(params?.id ?? "").trim();
@@ -799,6 +1394,35 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
         id,
       ]);
       config.channels.feishu.groupAllowFrom = nextGroupAllowFrom;
+      writeUserConfigAndRestart(config);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── 添加用户白名单条目（飞书 open_id / union_id） ──
+  ipcMain.handle("settings:add-feishu-user-allow-from", async (_event, params) => {
+    const id = String(params?.id ?? "").trim();
+    if (!id) {
+      return { success: false, message: "用户 ID 不能为空。" };
+    }
+    if (!looksLikeFeishuUserId(id)) {
+      return { success: false, message: "仅允许填写以 ou_ 开头的飞书用户 open_id。" };
+    }
+
+    try {
+      const config = readUserConfig();
+      config.channels ??= {};
+      config.channels.feishu ??= {};
+      const currentAllowFrom = normalizeAllowFromEntries(config.channels.feishu.allowFrom)
+        .filter((entry) => entry !== WILDCARD_ALLOW_ENTRY);
+      const nextAllowFrom = dedupeEntries([...currentAllowFrom, id]);
+      if (nextAllowFrom.length > 0) {
+        config.channels.feishu.allowFrom = nextAllowFrom;
+      }
+      const nextStoreAllowFrom = dedupeEntries([...readFeishuAllowFromStore(), id]);
+      writeFeishuAllowFromStore(nextStoreAllowFrom);
       writeUserConfigAndRestart(config);
       return { success: true };
     } catch (err: any) {
@@ -860,9 +1484,11 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     }
   });
 
-  // ── 保存 Kimi 插件配置（支持 enabled=false 仅切换开关） ──
+  // ── 保存 Kimi 插件配置（支持 enabled=false 仅切换开关；wsURL/kimiapiHost 为可选覆盖） ──
   ipcMain.handle("settings:save-kimi-config", async (_event, params) => {
     const botToken = typeof params?.botToken === "string" ? params.botToken.trim() : "";
+    const wsURL = typeof params?.wsURL === "string" ? params.wsURL.trim() : "";
+    const kimiapiHost = typeof params?.kimiapiHost === "string" ? params.kimiapiHost.trim() : "";
     const enabled = params?.enabled;
     return runTrackedSettingsAction("save_kimi", { enabled }, async () => {
       try {
@@ -890,7 +1516,18 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
         }
 
         const gatewayToken = ensureGatewayAuthTokenInConfig(config);
-        saveKimiPluginConfig(config, { botToken, gatewayToken, wsURL: DEFAULT_KIMI_BRIDGE_WS_URL });
+        // kimiapiHost 同时控制 kimi-claw（IM subscribe base_url）与 kimi-search（serviceBaseUrl）
+        // 传 undefined（未提供）→ 保留存量；传空串 → 清回默认。
+        saveKimiPluginConfig(config, {
+          botToken,
+          gatewayToken,
+          wsURL: wsURL || undefined,
+          kimiapiHost: typeof params?.kimiapiHost === "string" ? kimiapiHost : undefined,
+        });
+        // kimi-search 联动：显式提供 kimiapiHost（含空串）都同步写；未提供则保留存量
+        if (typeof params?.kimiapiHost === "string") {
+          saveKimiSearchConfig(config, { enabled: true, serviceBaseUrl: kimiapiHost });
+        }
         writeUserConfigAndRestart(config);
         return { success: true };
       } catch (err: any) {
@@ -922,6 +1559,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
         // 专属 key 存到 sidecar 文件，不写入 openclaw.json
         if (typeof apiKey === "string") {
           writeKimiSearchDedicatedApiKey(apiKey);
+          setProxySearchDedicatedKey(apiKey);
         }
         const config = readUserConfig();
         saveKimiSearchConfig(config, { enabled, serviceBaseUrl });
@@ -931,6 +1569,51 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
         return { success: false, message: err.message || String(err) };
       }
     });
+  });
+
+  // ── 读取记忆配置 ──
+  ipcMain.handle("settings:get-memory-config", async () => {
+    try {
+      const config = readUserConfig();
+      // session-memory hook
+      const hookEntry = config?.hooks?.internal?.entries?.["session-memory"];
+      const sessionMemoryEnabled = hookEntry?.enabled !== false;
+      // embedding：有 provider + model 配置即为启用（memorySearch.enabled 控制整个搜索工具，不在此处判断）
+      const ms = config?.agents?.defaults?.memorySearch;
+      const embeddingEnabled = ms?.provider === "openai" && !!ms?.model;
+      // kimi-code 是否已配置
+      const isKimiCodeConfigured = !!(config?.models?.providers?.["kimi-coding"]?.apiKey);
+      return { success: true, data: { sessionMemoryEnabled, embeddingEnabled, isKimiCodeConfigured } };
+    } catch (err: any) {
+      return { success: false, message: err.message };
+    }
+  });
+
+  // ── 保存记忆配置 ──
+  ipcMain.handle("settings:save-memory-config", async (_event, params) => {
+    try {
+      const config = readUserConfig();
+      // session-memory hook
+      config.hooks ??= {};
+      config.hooks.internal ??= {};
+      config.hooks.internal.entries ??= {};
+      config.hooks.internal.entries["session-memory"] = {
+        ...(config.hooks.internal.entries["session-memory"] ?? {}),
+        enabled: params?.sessionMemoryEnabled !== false,
+      };
+      // embedding 开关：只控制 provider/model，不碰 memorySearch.enabled（关键词搜索始终可用）
+      if (params?.embeddingEnabled === true) {
+        ensureMemorySearchProxyConfig(config, getProxyPort());
+      } else if (params?.embeddingEnabled === false && config?.agents?.defaults?.memorySearch) {
+        delete config.agents.defaults.memorySearch.provider;
+        delete config.agents.defaults.memorySearch.model;
+        delete config.agents.defaults.memorySearch.remote;
+      }
+      writeUserConfigAndRestart(config);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
   });
 
   // ── 查询 Kimi 会员用量（GET /v1/usages） ──
@@ -949,7 +1632,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
       const resolveApiKey = (): string => {
         const oauthToken = loadOAuthToken();
         if (oauthToken?.access_token) return oauthToken.access_token;
-        return config?.models?.providers?.["kimi-coding"]?.apiKey || "";
+        return readKimiApiKey() || "";
       };
 
       let apiKey = resolveApiKey();
@@ -1001,7 +1684,14 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
       return {
         success: true,
         data: {
-          browserProfile: config?.browser?.defaultProfile ?? "openclaw",
+          // 新字段：Settings UI 的三选 radio 用
+          browserMode: detectBrowserMode(config),
+          // 旧字段：向后兼容（值是 gateway defaultProfile，非 UI mode）
+          // 注意 webbridge 模式下也保留底层 profile 值（plugin disabled 决定模式而不是 profile）
+          browserProfile:
+            (typeof config?.browser?.defaultProfile === "string"
+              ? config.browser.defaultProfile
+              : "") || "openclaw",
           imessageEnabled: config?.channels?.imessage?.enabled !== false,
           launchAtLoginSupported: launchAtLoginState.supported,
           launchAtLogin: launchAtLoginState.enabled,
@@ -1016,19 +1706,67 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
 
   // ── 保存高级配置 ──
   ipcMain.handle("settings:save-advanced", async (_event, params) => {
-    const { browserProfile, imessageEnabled } = params;
+    const { browserProfile, browserMode, imessageEnabled } = params;
     const launchAtLogin = typeof params?.launchAtLogin === "boolean" ? params.launchAtLogin : undefined;
     const sessionMemoryEnabled = typeof params?.sessionMemoryEnabled === "boolean" ? params.sessionMemoryEnabled : undefined;
     const clawHubRegistry = typeof params?.clawHubRegistry === "string" ? params.clawHubRegistry.trim() : undefined;
     return runTrackedSettingsAction(
       "save_advanced",
-      { browser_profile: browserProfile, imessage_enabled: imessageEnabled, launch_at_login: launchAtLogin, session_memory: sessionMemoryEnabled },
+      {
+        browser_mode: browserMode ?? null,
+        browser_profile: browserProfile ?? null,
+        imessage_enabled: imessageEnabled,
+        launch_at_login: launchAtLogin,
+        session_memory: sessionMemoryEnabled,
+      },
       async () => {
         try {
           const config = readUserConfig();
 
-          config.browser ??= {};
-          config.browser.defaultProfile = browserProfile;
+          // 优先 browserMode（新前端）；回退 browserProfile（老前端兼容）
+          // coerce 顺手吃下早期分支的 alias —— browserMode === "chrome" 自动归一化成 "user"
+          const coercedMode = coerceBrowserMode(browserMode);
+          if (coercedMode) {
+            // webbridge 模式服务端兜底：三项都过才能切（防前端被绕过 / 条件在选中到保存之间变化）
+            if (coercedMode === "webbridge") {
+              const def = await getDefaultBrowser();
+              const pre = await getWebbridgePrecheck({
+                binaryPath: resolveWebbridgeBinaryPath(),
+                extensionId: readWebbridgeExtensionId(),
+                fileExists: fs.existsSync,
+                readExtensionStates: (extId) =>
+                  getExtensionStates(specFromExtId(extId), {
+                    processExec: DEFAULT_PROCESS_EXEC,
+                    processCheckBrowserId: def?.target.id,
+                  }),
+                getDefaultBrowser,
+                readSkillEnabled: readKimiWebbridgeSkillEnabled,
+                currentBrowserMode: getCurrentBrowserMode(),
+              });
+              if (!pre.ok) {
+                return {
+                  success: false,
+                  code: pre.defaultUnsupported
+                    ? "DEFAULT_BROWSER_UNSUPPORTED"
+                    : "WEBBRIDGE_PRECHECK_FAILED",
+                  missing: pre.missing,
+                  defaultBrowser: pre.defaultBrowser,
+                  defaultUnsupported: pre.defaultUnsupported,
+                  message: "WebBridge 条件未满足；请先点[修复并启用]",
+                };
+              }
+            }
+            Object.assign(config, applyBrowserModeConfig(config, coercedMode));
+          } else if (typeof browserProfile === "string" && browserProfile) {
+            // 老前端兼容：直接传 profile 名（"openclaw" / "user" / "chrome" / 自定义）。
+            // 走 main 分支的 normalize：旧名 "chrome" → "user"，并清掉 driver:"extension" 残留。
+            config.browser ??= {};
+            config.browser.defaultProfile = normalizeRequestedBrowserProfileForSave(
+              config,
+              browserProfile,
+            );
+            migrateBrowserProfileForCurrentGateway(config);
+          }
 
           config.channels ??= {};
           config.channels.imessage ??= {};
@@ -1061,6 +1799,481 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     );
   });
 
+  // ── WebBridge 安装状态（只读，不调 CLI） ──
+  // 单一默认浏览器策略：只对默认浏览器查进程，避免 Win 下 Defender 实时扫描 tasklist
+  // 翻倍延迟。非默认浏览器上的 running 字段会是 false（我们不再关心）。
+  ipcMain.handle("settings:webbridge-status", async () => {
+    try {
+      const def = await getDefaultBrowser();
+      const state = await getWebbridgeInstallState({
+        binaryPath: resolveWebbridgeBinaryPath(),
+        dataDir: resolveWebbridgeDataDir(),
+        fileExists: fs.existsSync,
+        readManifest: readCacheManifest,
+        readExtensionStates: (extId) =>
+          getExtensionStates(specFromExtId(extId), {
+            processExec: DEFAULT_PROCESS_EXEC,
+            processCheckBrowserId: def?.target.id,
+          }),
+        extensionId: readWebbridgeExtensionId(),
+      });
+      return { success: true, data: state };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── WebBridge 切换前置 precheck（read-only；binary/skill/extension 三项 + default browser） ──
+  ipcMain.handle("settings:webbridge-precheck", async () => {
+    try {
+      const def = await getDefaultBrowser();
+      const result = await getWebbridgePrecheck({
+        binaryPath: resolveWebbridgeBinaryPath(),
+        extensionId: readWebbridgeExtensionId(),
+        fileExists: fs.existsSync,
+        readExtensionStates: (extId) =>
+          getExtensionStates(specFromExtId(extId), {
+            processExec: DEFAULT_PROCESS_EXEC,
+            processCheckBrowserId: def?.target.id,
+          }),
+        getDefaultBrowser,
+        readSkillEnabled: readKimiWebbridgeSkillEnabled,
+        currentBrowserMode: getCurrentBrowserMode(),
+      });
+      return { success: true, data: result };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── 拿系统默认浏览器名（给 setup done modal 文案用） ──
+  ipcMain.handle("settings:get-default-browser-name", async () => {
+    const d = await getDefaultBrowser();
+    return {
+      success: true,
+      data: d ? { id: d.target.id, name: d.target.name } : null,
+    };
+  });
+
+  // ── 主窗左侧栏「连接你的常用浏览器」pill ──
+  // 单一职责：当前是 webbridge 模式 + 扩展实际未在浏览器里启用 → 显示，否则隐藏。
+  // 设计前提（来自用户测试用例树）：
+  //   - 用户启用 webbridge 后 setup-task 已经把 binary/skill/JSON 装好、清过 blocklist
+  //   - 唯一会让扩展不工作的常见情况就是用户没在浏览器弹窗里点"启用"
+  //   - 这种情况 OneClaw 修不了，只能催用户去操作；pill 是纯信息，无 click → repair
+  //   - settings 高级页面也不应报"需要修复"（已通过 precheck 简化处理）
+  // 退化场景（默认浏览器变成非 Chrome/Edge、binary/skill 被人删了）罕见，pill 隐藏即可——
+  // settings 高级页面会通过另一条 precheck 路径暴露这些真坏的状态。
+  ipcMain.handle("settings:webbridge-needs-repair", async () => {
+    try {
+      if (getCurrentBrowserMode() !== "webbridge") {
+        return { success: true, data: { visible: false, defaultBrowser: null } };
+      }
+      // pill 可见性 = OneClaw 组件是否健康 + 用户是否真的启用了扩展
+      //   1) 三组件（binary/skill/extension）任一缺 → pill 显示让用户修
+      //   2) 三组件都健康但 presentInChrome=false（用户没在浏览器点"启用扩展"）→ pill 仍显示
+      //      —— External JSON 写完只是"我们这边装好了"，必须等用户在浏览器里启用才算真正连接
+      const extId = readWebbridgeExtensionId();
+      const pre = await getWebbridgePrecheck({
+        binaryPath: resolveWebbridgeBinaryPath(),
+        extensionId: extId,
+        fileExists: fs.existsSync,
+        readExtensionStates: (id) =>
+          getExtensionStates(specFromExtId(id), {
+            processExec: DEFAULT_PROCESS_EXEC,
+          }),
+        getDefaultBrowser,
+        readSkillEnabled: readKimiWebbridgeSkillEnabled,
+        currentBrowserMode: getCurrentBrowserMode(),
+      });
+      if (!pre.ok) {
+        return {
+          success: true,
+          data: { visible: true, defaultBrowser: pre.defaultBrowser },
+        };
+      }
+      // 三组件健康——再看用户是否真的启用了扩展
+      const def = pre.defaultBrowser;
+      if (!def || !extId) {
+        return { success: true, data: { visible: false, defaultBrowser: def } };
+      }
+      const states = await getExtensionStates(specFromExtId(extId), {
+        processExec: DEFAULT_PROCESS_EXEC,
+        processCheckBrowserId: def.id,
+      });
+      const enabled = states.find((s) => s.browserId === def.id)
+        ?.presentInChrome === true;
+      return {
+        success: true,
+        data: { visible: !enabled, defaultBrowser: def },
+      };
+    } catch (err: any) {
+      return {
+        success: true,
+        data: { visible: false, defaultBrowser: null },
+        message: err?.message,
+      };
+    }
+  });
+
+  // ── WebBridge 修复并启用：按 precheck 结果选择性修复 → 写 config + 重启 gateway ──
+  // 单一默认浏览器策略：只对系统默认浏览器（Chrome/Edge）做修复；默认非支持直接拒绝。
+  ipcMain.handle("settings:webbridge-repair-and-enable", async () => {
+    try {
+      // 0. 默认浏览器必须是 Chrome/Edge，不然没法修
+      const def = await getDefaultBrowser();
+      if (!def) {
+        return {
+          success: false,
+          code: "DEFAULT_BROWSER_UNSUPPORTED",
+          message:
+            "系统默认浏览器不是 Chrome 或 Edge，请先在系统设置中修改默认浏览器。",
+        };
+      }
+
+      const extId = readWebbridgeExtensionId();
+      const binaryPath = resolveWebbridgeBinaryPath();
+
+      // 1. 先跑 precheck 知道缺啥（只查默认浏览器的进程，省 1 次 tasklist）
+      const pre = await getWebbridgePrecheck({
+        binaryPath,
+        extensionId: extId,
+        fileExists: fs.existsSync,
+        readExtensionStates: (id) =>
+          getExtensionStates(specFromExtId(id), {
+            processExec: DEFAULT_PROCESS_EXEC,
+            processCheckBrowserId: def.target.id,
+          }),
+        getDefaultBrowser,
+        readSkillEnabled: readKimiWebbridgeSkillEnabled,
+        currentBrowserMode: getCurrentBrowserMode(),
+      });
+
+      // 2. 只有 extension 项要修时才检查默认浏览器是否在跑
+      //    （清 blocklist / 写 External Extensions / 验证 presentInChrome 都需要浏览器关闭，
+      //     binary-only / skill-only 修复完全不碰浏览器，没理由勒令关。）
+      //    Win Edge 经典坑：用户已关窗口但 "Continue running background apps" 让 msedge.exe
+      //    后台进程残留，触发 "请退出 Edge" 提示但用户实际已关——区分前台/后台两种状态。
+      if (pre.missing.extension && isBrowserInstalled(def.target)) {
+        const state = await getBrowserRunningState(def.target);
+        if (state === "foreground") {
+          return {
+            success: false,
+            code: "BROWSER_RUNNING",
+            browserName: def.target.name,
+            message: `${def.target.name} 正在运行；请先完全退出 ${def.target.name} 后再点修复。`,
+          };
+        }
+        if (state === "background-only") {
+          const k = await killBackgroundProcesses(def.target);
+          log.info(
+            `[webbridge-repair] ${def.target.name} background-only 清理: killed=${k.killed}${
+              k.error ? ` error=${k.error}` : ""
+            }`,
+          );
+        }
+      }
+      if (pre.missing.extension) {
+        // 3. 用户从 UI 卸过扩展会进 external_uninstalls 黑名单，写 JSON 静默失效。
+        //    只有 extension 项要修时才需要清；只清默认浏览器。
+        if (extId && isBrowserInstalled(def.target)) {
+          if (await isExtensionBlocklisted(def.target, extId)) {
+            const cleanResult = await cleanExtensionBlocklist(
+              def.target,
+              extId,
+            );
+            log.info(
+              `[webbridge-repair] ${def.target.name} blocklist cleanup: ${cleanResult}`,
+            );
+          }
+        }
+      }
+
+      // 4. 选择性修复：只对真正缺的项跑安装；扩展只装到默认浏览器
+      const summary = await runWebbridgeSetupTask({
+        installer: () => installWebbridge({ force: false }),
+        installExtensions: async () => {
+          const spec = resolveWebbridgeExtensionSpec();
+          if (!spec) {
+            log.error(
+              "[webbridge-repair] 无法解析 ExtensionSpec（CRX 资源缺失），跳过扩展安装",
+            );
+            return [];
+          }
+          return installForDefaultBrowser(spec);
+        },
+        readConfig: readUserConfig,
+        writeConfig: writeUserConfig, // fallbackOnFailure:false 下不会被调
+        applyMode: applyBrowserModeConfig,
+        extensionId: extId,
+        installSkill: (bp) => installWebbridgeSkill(bp),
+        fallbackOnFailure: false,
+        skipBinaryInstall: !pre.missing.binary,
+        skipSkillInstall: !pre.missing.skill,
+        skipExtensionInstall: !pre.missing.extension,
+        existingBinaryPath: binaryPath,
+        logger: {
+          info: (m) => log.info(m),
+          error: (m) => log.error(m),
+        },
+      });
+      if (summary.outcome !== "webbridge-ready") {
+        return {
+          success: false,
+          code: "REPAIR_FAILED",
+          message: summary.error ?? "unknown",
+          summary,
+        };
+      }
+      // 三项全过 → 写 webbridge config + 重启 gateway
+      const config = readUserConfig();
+      Object.assign(config, applyBrowserModeConfig(config, "webbridge"));
+      writeUserConfigAndRestart(config);
+      // 含扩展修复 → 主动 open 引导页（同时启动浏览器触发"启用扩展"prompt）
+      // 跟 pill-repair 行为一致：避免用户多走一步「手动开浏览器」
+      const openedBrowser = pre.missing.extension
+        ? await openWebbridgeEnableGuideInBrowser()
+        : false;
+      return { success: true, data: summary, openedBrowser };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── 侧边栏 pill 点击 → 完整修复 (binary / skill / extension 三组件，按 precheck 选择性安装) ──
+  // 跟 webbridge-repair-and-enable 的区别：
+  //   - 假设已经在 webbridge 模式（不切模式），但仍然写 config 重启 gateway 让新装的 binary/skill 生效
+  //   - 用户场景：使用中删了 binary/skill，或 skill 关了，重启 gateway 后 pill 应当出现并能一键修
+  // 返回 code:
+  //   "READY"                       → 修复完成，gateway 已重启
+  //   "ALREADY_OK"                  → 三组件都 OK（precheck.ok=true），pill 自然该消失
+  //   "BROWSER_RUNNING"             → 缺扩展 + 浏览器在 foreground 跑，前端提示关闭再点
+  //   "DEFAULT_BROWSER_UNSUPPORTED" → 默认浏览器不是 Chrome/Edge
+  //   "FAILED"                      → 修复中途失败
+  ipcMain.handle("settings:webbridge-pill-repair", async () => {
+    try {
+      const def = await getDefaultBrowser();
+      if (!def) {
+        return { success: false, code: "DEFAULT_BROWSER_UNSUPPORTED" };
+      }
+      const extId = readWebbridgeExtensionId();
+      const binaryPath = resolveWebbridgeBinaryPath();
+
+      // 1. 跑 precheck 知道缺哪几项
+      const pre = await getWebbridgePrecheck({
+        binaryPath,
+        extensionId: extId,
+        fileExists: fs.existsSync,
+        readExtensionStates: (id) =>
+          getExtensionStates(specFromExtId(id), {
+            processExec: DEFAULT_PROCESS_EXEC,
+            processCheckBrowserId: def.target.id,
+          }),
+        getDefaultBrowser,
+        readSkillEnabled: readKimiWebbridgeSkillEnabled,
+        currentBrowserMode: getCurrentBrowserMode(),
+      });
+
+      if (pre.ok) {
+        // 三组件都健康——再看用户是否真的启用了扩展
+        const states = await getExtensionStates(specFromExtId(extId), {
+          processExec: DEFAULT_PROCESS_EXEC,
+          processCheckBrowserId: def.target.id,
+        });
+        const enabled = states.find((s) => s.browserId === def.target.id)
+          ?.presentInChrome === true;
+        if (enabled) {
+          return { success: true, code: "ALREADY_OK" };
+        }
+        // 我们这边都装好了，剩下的是用户去浏览器点「启用扩展」
+        // 浏览器关 → 主动 open 引导页（同时启动浏览器，启动时会弹"启用扩展"prompt）
+        // 浏览器跑 → 没法自动重启，前端弹 modal 提示「请重启」
+        const browserRunning = isBrowserInstalled(def.target)
+          ? (await getBrowserRunningState(def.target)) !== "not-running"
+          : false;
+        const openedBrowser = !browserRunning
+          ? await openWebbridgeEnableGuideInBrowser()
+          : false;
+        return {
+          success: true,
+          code: "READY",
+          browserName: def.target.name,
+          includesExtension: true,
+          browserRunning,
+          openedBrowser,
+        };
+      }
+
+      // 2. 缺扩展 + 浏览器 foreground → 必须让用户关浏览器（无法 race-safe 清 blocklist）
+      if (pre.missing.extension && isBrowserInstalled(def.target)) {
+        const state = await getBrowserRunningState(def.target);
+        if (state === "foreground") {
+          return {
+            success: false,
+            code: "BROWSER_RUNNING",
+            browserName: def.target.name,
+          };
+        }
+        if (state === "background-only") {
+          const k = await killBackgroundProcesses(def.target);
+          log.info(
+            `[webbridge-pill-repair] ${def.target.name} background-only 清理: killed=${k.killed}${
+              k.error ? ` error=${k.error}` : ""
+            }`,
+          );
+        }
+      }
+
+      // 3. 清 blocklist（仅当要装扩展时）
+      if (pre.missing.extension && extId && isBrowserInstalled(def.target)) {
+        if (await isExtensionBlocklisted(def.target, extId)) {
+          const cleanResult = await cleanExtensionBlocklist(def.target, extId);
+          log.info(
+            `[webbridge-pill-repair] ${def.target.name} blocklist cleanup: ${cleanResult}`,
+          );
+        }
+      }
+
+      // 4. 选择性修复：按 precheck 缺啥跑啥
+      const summary = await runWebbridgeSetupTask({
+        installer: () => installWebbridge({ force: false }),
+        installExtensions: async () => {
+          const spec = resolveWebbridgeExtensionSpec();
+          if (!spec) {
+            log.error(
+              "[webbridge-repair] 无法解析 ExtensionSpec（CRX 资源缺失），跳过扩展安装",
+            );
+            return [];
+          }
+          return installForDefaultBrowser(spec);
+        },
+        readConfig: readUserConfig,
+        writeConfig: writeUserConfig, // fallbackOnFailure:false 下不会被调
+        applyMode: applyBrowserModeConfig,
+        extensionId: extId,
+        installSkill: (bp) => installWebbridgeSkill(bp),
+        fallbackOnFailure: false,
+        skipBinaryInstall: !pre.missing.binary,
+        skipSkillInstall: !pre.missing.skill,
+        skipExtensionInstall: !pre.missing.extension,
+        existingBinaryPath: binaryPath,
+        logger: {
+          info: (m) => log.info(m),
+          error: (m) => log.error(m),
+        },
+      });
+
+      if (summary.outcome !== "webbridge-ready") {
+        return {
+          success: false,
+          code: "FAILED",
+          message: summary.error ?? "unknown",
+        };
+      }
+
+      // 5. 写 config 重启 gateway——确保新装的 binary/skill enable=true 立即生效
+      // 即便已经在 webbridge 模式，applyBrowserModeConfig 会把 skill enabled 翻回 true（修复 drift）
+      const config = readUserConfig();
+      Object.assign(config, applyBrowserModeConfig(config, "webbridge"));
+      writeUserConfigAndRestart(config);
+
+      // 修复路径走到这里时浏览器一定已关闭（缺扩展时 step 2 已要求关 + 杀 background）
+      // 含扩展修复 → 主动 open 引导页（同时启动浏览器触发"启用扩展"prompt）
+      // 仅 binary/skill 修复 → 不开浏览器，前端弹简短「WebBridge 已修复」modal
+      const openedBrowser = pre.missing.extension
+        ? await openWebbridgeEnableGuideInBrowser()
+        : false;
+      return {
+        success: true,
+        code: "READY",
+        browserName: def.target.name,
+        // 此次修复是否触及扩展——前端据此决定是否提示用户去浏览器点「启用扩展」
+        // 只装 binary/skill 时不需要这条提示，避免误导用户去找弹窗
+        includesExtension: pre.missing.extension,
+        browserRunning: false,
+        openedBrowser,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        code: "FAILED",
+        message: err?.message || String(err),
+      };
+    }
+  });
+
+  // ── 重新配置浏览器扩展（幂等；用户手动删了 External Extensions 时的恢复入口） ──
+  ipcMain.handle("settings:webbridge-install-extensions", async () => {
+    try {
+      const spec = resolveWebbridgeExtensionSpec();
+      if (!spec) {
+        return {
+          success: false,
+          message:
+            "本构建未注入 WebBridge 扩展 ID 或缺少内置 CRX（dev 构建？）",
+        };
+      }
+      const summary = await installForAllDetectedBrowsers(spec);
+      return { success: true, data: summary };
+    } catch (err: any) {
+      return { success: false, message: err.message || String(err) };
+    }
+  });
+
+  // ── 清理 Chrome external_uninstalls 黑名单（用户 UI 卸载过 → 阻断 External Extensions JSON 安装） ──
+  ipcMain.handle(
+    "settings:webbridge-clean-blocklist",
+    async (_evt, browserId: string) => {
+      try {
+        const target = BROWSER_TARGETS.find((t) => t.id === browserId);
+        if (!target) {
+          return { success: false, message: `Unknown browser: ${browserId}` };
+        }
+        const extId = readWebbridgeExtensionId();
+        if (!extId) {
+          return {
+            success: false,
+            message: "本构建未注入 WebBridge 扩展 ID（dev 构建）",
+          };
+        }
+        // 1. 浏览器在跑 → 拒绝（Chrome 启动时会用内存 Preferences 覆盖磁盘改动）
+        //    Win Edge 后台残留 → 主动清理（关窗即认为用户意图退出）
+        const state = await getBrowserRunningState(target);
+        if (state === "foreground") {
+          return {
+            success: false,
+            code: "BROWSER_RUNNING",
+            message: `${target.name} 正在运行；请先完全退出后再点清理。`,
+          };
+        }
+        if (state === "background-only") {
+          const k = await killBackgroundProcesses(target);
+          log.info(
+            `[clean-blocklist] ${target.name} background-only 清理: killed=${k.killed}${
+              k.error ? ` error=${k.error}` : ""
+            }`,
+          );
+        }
+        // 2. 双检：UI 状态可能过期，实际已不在 blocklist
+        if (!(await isExtensionBlocklisted(target, extId))) {
+          return { success: true, code: "NOT_BLOCKLISTED" };
+        }
+        // 3. 改 Preferences（含二次读取验证）
+        const result = await cleanExtensionBlocklist(target, extId);
+        if (result === "verify-failed") {
+          return {
+            success: false,
+            code: "VERIFY_FAILED",
+            message: `${target.name} 配置写入后再读取仍命中黑名单；请完全退出 ${target.name} 后重试。`,
+          };
+        }
+        return { success: true, code: result };
+      } catch (err: any) {
+        return { success: false, message: err.message || String(err) };
+      }
+    },
+  );
+
   // ── 读取 CLI 状态（enabled=用户偏好，installed=当前/旧版 wrapper 足迹） ──
   ipcMain.handle("settings:get-cli-status", async () => {
     try {
@@ -1074,12 +2287,16 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
   });
 
   // ── 安装 CLI（老用户迁移入口，默认不阻断其它设置流程） ──
+  // 原始 error message 含绝对路径，只上报分类枚举给分析侧。
   ipcMain.handle("settings:install-cli", async () => {
     const result = await installCli();
     if (result.success) {
       analytics.track("cli_installed", { method: "settings" });
     } else {
-      analytics.track("cli_install_failed", { method: "settings", error: result.message });
+      analytics.track("cli_install_failed", {
+        method: "settings",
+        error_type: analytics.classifyErrorType(result.message),
+      });
     }
     return result;
   });
@@ -1090,7 +2307,10 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     if (result.success) {
       analytics.track("cli_uninstalled", { method: "settings" });
     } else {
-      analytics.track("cli_uninstall_failed", { method: "settings", error: result.message });
+      analytics.track("cli_uninstall_failed", {
+        method: "settings",
+        error_type: analytics.classifyErrorType(result.message),
+      });
     }
     return result;
   });
@@ -1134,7 +2354,7 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     const oneClawVersion = app.getVersion();
     let openClawVersion = "unknown";
     try {
-      const pkgPath = path.join(resolveGatewayCwd(), "package.json");
+      const pkgPath = path.join(resolveGatewayPackageDir(), "package.json");
       const raw = fs.readFileSync(pkgPath, "utf-8");
       const pkg = JSON.parse(raw);
       if (pkg.version) openClawVersion = pkg.version;
@@ -1185,41 +2405,6 @@ export function registerSettingsIpc(opts: SettingsIpcOptions = {}): void {
     }
   });
 
-}
-
-// 读取当前飞书配对模式状态，供主进程轮询器判断是否需要继续监听。
-export function getFeishuPairingModeState(): {
-  enabled: boolean;
-  dmPolicy: "open" | "pairing" | "allowlist";
-  approvedUserCount: number;
-} {
-  const config = readUserConfig();
-  const feishu = config?.channels?.feishu ?? {};
-  const enabled = config?.plugins?.entries?.feishu?.enabled === true;
-  const dmPolicy = normalizeDmPolicy(feishu?.dmPolicy, "pairing");
-  const approvedUserIds = collectApprovedUserIds(FEISHU_CHANNEL, feishu?.allowFrom);
-  return {
-    enabled,
-    dmPolicy,
-    approvedUserCount: approvedUserIds.length,
-  };
-}
-
-// 读取当前企业微信配对模式状态，供主进程轮询器判断是否需要继续监听。
-export function getWecomPairingModeState(): {
-  enabled: boolean;
-  dmPolicy: "open" | "pairing" | "allowlist";
-  approvedUserCount: number;
-} {
-  const config = readUserConfig();
-  const wecom = config?.channels?.[WECOM_CHANNEL_ID] ?? {};
-  const enabled = config?.plugins?.entries?.["wecom-openclaw-plugin"]?.enabled === true;
-  const dmPolicy = normalizeDmPolicy(wecom?.dmPolicy, "pairing");
-  return {
-    enabled,
-    dmPolicy,
-    approvedUserCount: collectApprovedUserIds(WECOM_CHANNEL_ID, wecom?.allowFrom).length,
-  };
 }
 
 // 列出飞书待审批请求：解析 CLI 输出并统一成前端可消费结构。
@@ -1384,135 +2569,6 @@ function collectApprovedUserIds(channel: string, configAllowFrom: unknown): stri
   return dedupeEntries([...configEntries, ...storeEntries]);
 }
 
-// 返回首配自动批准窗口文件路径（sidecar，不污染 openclaw.json schema）。
-function resolveFeishuFirstPairingWindowPath(): string {
-  return path.join(resolveUserStateDir(), "credentials", FEISHU_FIRST_PAIRING_WINDOW_FILE);
-}
-
-// 读取首配自动批准窗口状态；解析失败返回 null，保证调用端逻辑简单。
-function readFeishuFirstPairingWindowState(): FeishuFirstPairingWindowState | null {
-  const filePath = resolveFeishuFirstPairingWindowPath();
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-  try {
-    const parsed = parseJsonSafe(fs.readFileSync(filePath, "utf-8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
-    }
-    const openedAtMs = Number((parsed as Record<string, unknown>).openedAtMs);
-    const expiresAtMs = Number((parsed as Record<string, unknown>).expiresAtMs);
-    const consumedAtRaw = (parsed as Record<string, unknown>).consumedAtMs;
-    const consumedAtMs = consumedAtRaw == null ? null : Number(consumedAtRaw);
-    const consumedBy = String((parsed as Record<string, unknown>).consumedBy ?? "").trim();
-    if (!Number.isFinite(openedAtMs) || !Number.isFinite(expiresAtMs)) {
-      return null;
-    }
-    return {
-      openedAtMs,
-      expiresAtMs,
-      consumedAtMs: consumedAtMs == null || !Number.isFinite(consumedAtMs) ? null : consumedAtMs,
-      consumedBy,
-    };
-  } catch {
-    return null;
-  }
-}
-
-// 原子写入首配窗口状态文件，所有窗口相关状态变更都通过这个函数落盘。
-function writeFeishuFirstPairingWindowState(state: FeishuFirstPairingWindowState): void {
-  const filePath = resolveFeishuFirstPairingWindowPath();
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf-8");
-}
-
-// 开启首配自动批准时间窗；若已消费过则保持熔断，不再重开窗口。
-function openFeishuFirstPairingWindow(nowMs = Date.now()): void {
-  const prev = readFeishuFirstPairingWindowState();
-  if (prev?.consumedAtMs) {
-    return;
-  }
-  writeFeishuFirstPairingWindowState({
-    openedAtMs: nowMs,
-    expiresAtMs: nowMs + FEISHU_FIRST_PAIRING_WINDOW_TTL_MS,
-    consumedAtMs: null,
-    consumedBy: "",
-  });
-}
-
-// 关闭首配自动批准窗口：未消费场景删除文件；已消费场景保留熔断标记。
-export function closeFeishuFirstPairingWindow(): void {
-  const filePath = resolveFeishuFirstPairingWindowPath();
-  const prev = readFeishuFirstPairingWindowState();
-  if (prev?.consumedAtMs) {
-    return;
-  }
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
-}
-
-// 标记首配窗口已消费，无论批准成功或失败都熔断，避免重试风暴。
-export function consumeFeishuFirstPairingWindow(userId: string): void {
-  const nowMs = Date.now();
-  const prev = readFeishuFirstPairingWindowState();
-  if (prev) {
-    writeFeishuFirstPairingWindowState({
-      ...prev,
-      consumedAtMs: prev.consumedAtMs ?? nowMs,
-      consumedBy: prev.consumedBy || String(userId ?? "").trim(),
-    });
-    return;
-  }
-  writeFeishuFirstPairingWindowState({
-    openedAtMs: nowMs,
-    expiresAtMs: nowMs,
-    consumedAtMs: nowMs,
-    consumedBy: String(userId ?? "").trim(),
-  });
-}
-
-// 判断首配窗口是否处于生效期；过期或已消费都返回 false，并自动清理过期窗口。
-export function isFeishuFirstPairingWindowActive(nowMs = Date.now()): boolean {
-  const state = readFeishuFirstPairingWindowState();
-  if (!state) {
-    return false;
-  }
-  if (state.consumedAtMs) {
-    return false;
-  }
-  if (nowMs > state.expiresAtMs) {
-    closeFeishuFirstPairingWindow();
-    return false;
-  }
-  return nowMs >= state.openedAtMs;
-}
-
-// 根据当前飞书配置与授权状态维护首配窗口，避免把窗口状态散落在多个调用点。
-function reconcileFeishuFirstPairingWindow(config: any): void {
-  const enabled = config?.plugins?.entries?.feishu?.enabled === true;
-  if (!enabled) {
-    closeFeishuFirstPairingWindow();
-    return;
-  }
-
-  const feishu = config?.channels?.feishu ?? {};
-  const dmPolicy = normalizeDmPolicy(feishu?.dmPolicy, "pairing");
-  if (dmPolicy !== "pairing") {
-    closeFeishuFirstPairingWindow();
-    return;
-  }
-
-  const approvedUserIds = collectApprovedUserIds(FEISHU_CHANNEL, feishu?.allowFrom);
-  if (approvedUserIds.length > 0) {
-    closeFeishuFirstPairingWindow();
-    return;
-  }
-
-  openFeishuFirstPairingWindow();
-}
-
 // 统一运行 openclaw CLI 子命令，复用 OneClaw 内嵌 runtime 与网关入口。
 async function runGatewayCli(args: string[]): Promise<CliRunResult> {
   const nodeBin = resolveNodeBin();
@@ -1613,7 +2669,7 @@ function writeChannelAllowFromStore(channel: string, entries: string[]): void {
   );
 }
 
-// 读取本地“已拒绝配对码”sidecar，用于过滤待审批列表。
+// 读取本地"已拒绝配对码"sidecar，用于过滤待审批列表。
 function readRejectedPairingStore(fileName: string): FeishuRejectedPairingStore {
   const filePath = path.join(resolveUserStateDir(), "credentials", fileName);
   if (!fs.existsSync(filePath)) {
@@ -1629,7 +2685,7 @@ function readRejectedPairingStore(fileName: string): FeishuRejectedPairingStore 
   }
 }
 
-// 写入本地“已拒绝配对码”sidecar，空数组时删除文件。
+// 写入本地"已拒绝配对码"sidecar，空数组时删除文件。
 function writeRejectedPairingStore(fileName: string, codes: string[]): void {
   const normalized = normalizeAllowFromEntries(codes);
   const dir = path.join(resolveUserStateDir(), "credentials");
@@ -1648,12 +2704,10 @@ function writeRejectedPairingStore(fileName: string, codes: string[]): void {
   fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf-8");
 }
 
-// 读取某个渠道的拒绝码列表。
 function readRejectedPairingCodes(fileName: string): string[] {
   return readRejectedPairingStore(fileName).codes;
 }
 
-// 追加单个拒绝码（幂等）。
 function appendRejectedPairingCode(fileName: string, code: string): void {
   const trimmed = String(code ?? "").trim();
   if (!trimmed) return;
@@ -1663,7 +2717,6 @@ function appendRejectedPairingCode(fileName: string, code: string): void {
   writeRejectedPairingStore(fileName, store.codes);
 }
 
-// 移除单个拒绝码（批准后自动清理）。
 function removeRejectedPairingCode(fileName: string, code: string): void {
   const trimmed = String(code ?? "").trim();
   if (!trimmed) return;
@@ -1673,7 +2726,6 @@ function removeRejectedPairingCode(fileName: string, code: string): void {
   writeRejectedPairingStore(fileName, nextCodes);
 }
 
-// 清理过期拒绝码：只保留当前 pending 列表里仍存在的 code。
 function pruneRejectedPairingCodes(fileName: string, activeCodes: Set<string>): void {
   const store = readRejectedPairingStore(fileName);
   if (store.codes.length === 0) return;
@@ -1682,7 +2734,6 @@ function pruneRejectedPairingCodes(fileName: string, activeCodes: Set<string>): 
   writeRejectedPairingStore(fileName, nextCodes);
 }
 
-// 渠道专用 sidecar 文件映射；目前只有飞书和企业微信会走这套拒绝码逻辑。
 function resolveRejectedPairingStoreFile(channel: string): string {
   if (channel === WECOM_CHANNEL_ID) {
     return WECOM_REJECTED_PAIRING_STORE_FILE;
@@ -1698,26 +2749,6 @@ function readFeishuAllowFromStore(): string[] {
 // 写入飞书 allowFrom store 文件（兼容保留原有字段）。
 function writeFeishuAllowFromStore(entries: string[]): void {
   writeChannelAllowFromStore(FEISHU_CHANNEL, entries);
-}
-
-// 读取拒绝码列表。
-function readFeishuRejectedPairingCodes(): string[] {
-  return readRejectedPairingCodes(FEISHU_REJECTED_PAIRING_STORE_FILE);
-}
-
-// 追加单个拒绝码（幂等）。
-function appendFeishuRejectedPairingCode(code: string): void {
-  appendRejectedPairingCode(FEISHU_REJECTED_PAIRING_STORE_FILE, code);
-}
-
-// 移除单个拒绝码（批准后自动清理）。
-function removeFeishuRejectedPairingCode(code: string): void {
-  removeRejectedPairingCode(FEISHU_REJECTED_PAIRING_STORE_FILE, code);
-}
-
-// 清理过期拒绝码：只保留当前 pending 列表里仍存在的 code。
-function pruneFeishuRejectedPairingCodes(activeCodes: Set<string>): void {
-  pruneRejectedPairingCodes(FEISHU_REJECTED_PAIRING_STORE_FILE, activeCodes);
 }
 
 // 补全授权条目的可读名称：用户/群聊优先查缓存，未命中则实时查询并回写缓存。
@@ -2023,7 +3054,15 @@ function extractProviderInfo(config: any): any {
   if (providerKey === "kimi-coding") {
     provider = "moonshot";
     subPlatform = "kimi-code";
-    apiKey = providers["kimi-coding"]?.apiKey ?? "";
+    // 代理模式下 config 中是 "proxy-managed"，从 sidecar / OAuth 读取真实 key
+    const configKey = providers["kimi-coding"]?.apiKey ?? "";
+    if (configKey === "proxy-managed") {
+      const { loadOAuthToken } = require("./kimi-oauth");
+      const oauthToken = loadOAuthToken();
+      apiKey = oauthToken?.access_token || readKimiApiKey() || "";
+    } else {
+      apiKey = configKey;
+    }
     configuredModels = extractModelIds(providers["kimi-coding"]);
   } else if (providerKey === "moonshot") {
     provider = "moonshot";
@@ -2083,7 +3122,7 @@ function extractProviderInfo(config: any): any {
     apiKey,
     baseURL,
     api,
-    supportsImage,
+    supportImage: supportsImage,
     configuredModels,
     raw: primary,
     savedProviders,
@@ -2111,8 +3150,28 @@ function mergeModels(provEntry: any, selectedID: string, prevModels: any[]): voi
   provEntry.models = merged;
 }
 
+// 给指定模型设置别名（name 字段），空别名时移除 name 让 UI 回退显示 id
+function applyModelAlias(provEntry: any, modelId: string, alias?: string): void {
+  if (!provEntry || !Array.isArray(provEntry.models)) return;
+  const idx = provEntry.models.findIndex((m: any) => {
+    const id = typeof m === "string" ? m : m?.id;
+    return id === modelId;
+  });
+  if (idx < 0) return;
+  // 字符串条目升级为对象格式
+  let entry = provEntry.models[idx];
+  if (typeof entry === "string") {
+    entry = { id: entry, name: entry, input: ["text"] };
+    provEntry.models[idx] = entry;
+  }
+  const trimmed = typeof alias === "string" ? alias.trim() : "";
+  // name 是 gateway schema 必填字段，空别名时回退到 id
+  entry.name = trimmed || entry.id;
+}
+
 // API Key 掩码：保留首尾各 4 字符
 function maskApiKey(key: string): string {
   if (!key || key.length <= 8) return key ? "••••••••" : "";
   return key.slice(0, 4) + "••••" + key.slice(-4);
 }
+

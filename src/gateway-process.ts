@@ -20,16 +20,26 @@ import {
   resolveUserBinDir,
   resolveUserStateDir,
 } from "./constants";
+import { uninstallGatewayDaemon, getPortPid } from "./install-detector";
 
 // 诊断日志（固定写入 ~/.openclaw/gateway.log，便于用户定位）
 const LOG_PATH = resolveGatewayLogPath();
+const MAX_DIAG_LOG_SIZE = 5 * 1024 * 1024;
+const DIAG_ROTATION_CHECK_INTERVAL = 1000;
+let diagWriteCount = 0;
 
 function diagLog(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
-  process.stderr.write(line);
+  try { process.stderr.write(line); } catch {}
   try {
     fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
     fs.appendFileSync(LOG_PATH, line);
+    if (++diagWriteCount >= DIAG_ROTATION_CHECK_INTERVAL) {
+      if (fs.statSync(LOG_PATH).size > MAX_DIAG_LOG_SIZE) {
+        fs.writeFileSync(LOG_PATH, "[truncated]\n");
+      }
+      diagWriteCount = 0;
+    }
   } catch {}
 }
 
@@ -49,6 +59,7 @@ export class GatewayProcess {
   private extraEnv: Record<string, string> = {};
   private lastCrashTime = 0;
   private onStateChange?: (state: GatewayState) => void;
+  private startedAt: number | null = null;
 
   // 世代计数器：每次 spawn 递增，exit handler 只处理同代进程的退出
   private generation = 0;
@@ -65,6 +76,10 @@ export class GatewayProcess {
 
   getPort(): number {
     return this.port;
+  }
+
+  getStartedAt(): number | null {
+    return this.startedAt;
   }
 
   // 更新端口（在 start 前调用，用于冲突解决场景）
@@ -97,7 +112,15 @@ export class GatewayProcess {
     // 前一次 stop 还未完成，等待其结束再启动
     if (this.state === "stopping") {
       diagLog("start() 等待前一次 stop 完成");
-      await this.waitForStopped(6000);
+      const deadline = Date.now() + 6000;
+      while (this.state === "stopping" && Date.now() < deadline) {
+        await sleep(100);
+      }
+      if (this.state === "stopping") {
+        diagLog("WARN: start() 等待 stop 超时，强制标记 stopped");
+        this.proc = null;
+        this.setState("stopped");
+      }
     }
 
     // 崩溃冷却期
@@ -136,6 +159,9 @@ export class GatewayProcess {
     // 清理升级残留的 lockfile（旧 gateway 可能是半死状态：进程活但 HTTP 不响应）
     await this.cleanStaleLockfile();
 
+    // 卸载 OpenClaw 系统守护进程 + 清理 tmpdir 锁文件，防止杀进程后被自动重启
+    await uninstallGatewayDaemon();
+
     // 启动前探测端口，若有旧 gateway 则自动停止
     const portBusy = await this.probeHealth();
     if (portBusy) {
@@ -146,10 +172,11 @@ export class GatewayProcess {
     // 确保 clawhub CLI wrapper 就绪
     ensureClawhubWrapper(nodeBin);
 
-    // 组装 PATH：用户 bin 目录 + 内嵌 runtime 优先
+    // 组装 PATH：用户 bin 目录 + 内嵌 runtime + officecli 优先
     const userBinDir = resolveUserBinDir();
     const runtimeDir = path.join(resolveResourcesPath(), "runtime");
-    const envPath = userBinDir + path.delimiter + runtimeDir + path.delimiter + (process.env.PATH ?? "");
+    const officecliDir = path.join(resolveResourcesPath(), "officecli");
+    const envPath = userBinDir + path.delimiter + runtimeDir + path.delimiter + officecliDir + path.delimiter + (process.env.PATH ?? "");
 
     // 递增世代，标记本次 spawn 的身份
     const gen = ++this.generation;
@@ -167,6 +194,12 @@ export class GatewayProcess {
         // 禁止 openclaw 入口在子进程内二次 respawn，避免 Windows 闪烁控制台窗口
         OPENCLAW_NO_RESPAWN: "1",
         OPENCLAW_LENIENT_CONFIG: "1",
+        // 统一状态目录：Windows 上 HOME 和 USERPROFILE 可能指向不同路径，
+        // OneClaw 用 USERPROFILE 写配置，openclaw 用 HOME 优先读配置，
+        // 显式传入 OPENCLAW_STATE_DIR 消除歧义。
+        OPENCLAW_STATE_DIR: resolveUserStateDir(),
+        // 告诉 openclaw 安装根目录，使 extensions 路径解析不依赖 __dirname（asar 内会失败）
+        OPENCLAW_INSTALL_ROOT: resolveResourcesPath(),
         OPENCLAW_GATEWAY_TOKEN: this.token,
         OPENCLAW_NPM_BIN: resolveNpmBin(),
         PATH: envPath,
@@ -185,12 +218,12 @@ export class GatewayProcess {
     // 转发日志（同时写入诊断文件）
     this.proc.stdout?.on("data", (d: Buffer) => {
       const s = d.toString();
-      process.stdout.write(`[gateway] ${s}`);
+      try { process.stdout.write(`[gateway] ${s}`); } catch {}
       diagLog(`stdout: ${s.trimEnd()}`);
     });
     this.proc.stderr?.on("data", (d: Buffer) => {
       const s = d.toString();
-      process.stderr.write(`[gateway] ${s}`);
+      try { process.stderr.write(`[gateway] ${s}`); } catch {}
       diagLog(`stderr: ${s.trimEnd()}`);
     });
 
@@ -230,25 +263,40 @@ export class GatewayProcess {
       }
     } else {
       diagLog("FATAL: health check timeout");
-      this.stop();
+      await this.stop();
     }
   }
 
-  // 停止 Gateway
-  stop(): void {
+  // 停止 Gateway：async，返回时保证进程已终结
+  async stop(): Promise<void> {
     if (!this.proc || this.state === "stopped" || this.state === "stopping") return;
 
+    const pid = this.proc.pid ?? 0;
     this.setState("stopping");
-    this.proc.kill("SIGTERM");
 
-    // 5s 强制终止兜底（用 exitCode 判断进程是否真正退出，而非 killed 标志）
-    const p = this.proc;
-    setTimeout(() => {
-      if (p && p.exitCode == null) {
-        diagLog("WARN: SIGTERM 超时，发送 SIGKILL");
-        p.kill("SIGKILL");
+    // 第一步：发送终止信号（Windows 杀整棵进程树，POSIX 先 SIGTERM）
+    if (IS_WIN && pid > 0) {
+      killProcess(pid);
+    } else {
+      this.proc.kill("SIGTERM");
+    }
+
+    // 第二步：等 exit 事件将状态推到 stopped（exit handler 负责状态转移）
+    const deadline = Date.now() + 5000;
+    while (this.getState() === "stopping" && Date.now() < deadline) {
+      await sleep(100);
+    }
+
+    // 第三步：超时兜底 — POSIX 升级 SIGKILL，Windows 已经是 /F 了
+    if (this.getState() === "stopping") {
+      diagLog("WARN: 停止超时，强制终止");
+      if (this.proc && !IS_WIN) {
+        this.proc.kill("SIGKILL");
+        await sleep(500);
       }
-    }, 5000);
+      this.proc = null;
+      this.setState("stopped");
+    }
   }
 
   // 停止已存在的旧 gateway（端口冲突时自动调用）
@@ -281,13 +329,25 @@ export class GatewayProcess {
         return;
       }
     }
-    diagLog("WARN: 等待端口释放超时，继续尝试启动");
+    // 优雅停止超时，按 PID 强杀占用端口的进程
+    diagLog("WARN: 等待端口释放超时，尝试强杀占用进程");
+    const pid = await getPortPid(this.port);
+    if (pid > 0) {
+      killProcess(pid);
+      for (let i = 0; i < 10; i++) {
+        await sleep(500);
+        if (!(await this.probeHealth())) {
+          diagLog(`强杀 pid=${pid} 后端口已释放`);
+          return;
+        }
+      }
+    }
+    diagLog("WARN: 强杀后端口仍被占用，继续尝试启动");
   }
 
-  // 重启：等旧进程真正退出后再启动
+  // 重启：stop() 返回时进程已死，直接 start()
   async restart(): Promise<void> {
-    this.stop();
-    await this.waitForStopped(6000);
+    await this.stop();
     await this.start();
   }
 
@@ -320,18 +380,6 @@ export class GatewayProcess {
       await sleep(HEALTH_POLL_INTERVAL_MS);
     }
     return false;
-  }
-
-  // 轮询等待状态变为 stopped（用于 restart 和 start 前等待旧进程结束）
-  private async waitForStopped(timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (this.state === "stopping" && Date.now() < deadline) {
-      await sleep(100);
-    }
-    if (this.state === "stopping") {
-      diagLog("WARN: waitForStopped 超时，强制标记 stopped");
-      this.setState("stopped");
-    }
   }
 
   // 仅当同一子进程仍存活时才认为启动检查有效，避免旧端口进程误判
@@ -383,6 +431,11 @@ export class GatewayProcess {
   private setState(s: GatewayState): void {
     const prev = this.state;
     this.state = s;
+    if (s === "running") {
+      this.startedAt = Date.now();
+    } else if (s === "stopped") {
+      this.startedAt = null;
+    }
     diagLog(`state: ${prev} → ${s}`);
     this.onStateChange?.(s);
   }

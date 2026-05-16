@@ -12,25 +12,44 @@ import oneClawLogo from "../assets/openclaw-favicon.svg";
 export type SidebarProps = {
   connected: boolean;
   currentSessionKey: string;
+  mainSessionKey: string | null;
   sessionOptions: Array<{ key: string; label: string; updatedAt?: number }>;
   settingsActive: boolean;
   skillsActive: boolean;
+  workspaceActive: boolean;
+  cronActive: boolean;
+  cronJobCount: number;
+  onOpenCron: () => void;
+  feedbackActive: boolean;
+  feedbackHasReply: boolean;
+  onOpenFeedback: () => void;
   updateStatus: "hidden" | "available" | "downloading";
   updateVersion: string | null;
   updatePercent: number | null;
   updateShowBadge: boolean;
-  refreshDisabled: boolean;
+  // 当前 webbridge 模式但浏览器扩展未启用 → 显示「连接你的常用浏览器」pill
+  // 用户在浏览器外部启用扩展 OneClaw 拿不到事件，所以 pill 改成可点击：
+  // 点一次重跑 needs-repair；扩展已启用就 pill 消失，否则保持显示
+  // checking=true 时图标换成转圈 loader
+  webbridgeRepairVisible: boolean;
+  webbridgeRepairBrowserName: string | null;
+  webbridgeRepairChecking: boolean;
+  onWebbridgeRepairClick: () => void;
   onToggleSidebar: () => void;
   onSelectSession: (sessionKey: string) => void;
   onNewChat: () => void;
   onRenameSession: (key: string, newLabel: string) => void;
   onDeleteSession: (key: string) => void;
-  onRefresh: () => void;
+  isDeletingSession: (key: string) => boolean;
+  settingsBadge: boolean;
   onOpenSettings: () => void;
   onOpenSkillStore: () => void;
+  onOpenWorkspace: () => void;
   onOpenWebUI: () => void;
   onOpenDocs: () => void;
+  errors: string[];
   onApplyUpdate: () => void;
+  onReconnect: () => void;
 };
 
 // 双击会话名触发内联重命名：创建 input 替换 span，Enter 保存，Escape 取消
@@ -71,8 +90,7 @@ function startInlineRename(
 }
 
 export function renderSidebar(props: SidebarProps) {
-  const statusClass = props.connected ? "ok" : "";
-  const statusText = props.connected ? t("sidebar.connected") : t("sidebar.disconnected");
+  // 刷新图标，断开连接时复用为重连按钮图标
   const refreshIcon = html`
     <svg
       width="18"
@@ -104,7 +122,8 @@ export function renderSidebar(props: SidebarProps) {
           class="oneclaw-sidebar__collapse"
           type="button"
           @click=${props.onToggleSidebar}
-          title=${t("sidebar.collapse")}
+          data-tooltip=${t("sidebar.collapse")}
+          data-tooltip-pos="bottom"
           aria-label=${t("sidebar.collapse")}
         >
           ${icons.panelLeft}
@@ -134,6 +153,7 @@ export function renderSidebar(props: SidebarProps) {
             (s) => s.key,
             (s) => {
               const isActive = s.key === props.currentSessionKey;
+              const isMain = props.mainSessionKey != null && s.key === props.mainSessionKey;
               return html`
                 <div
                   class="oneclaw-sidebar__session-item ${isActive ? "active" : ""}"
@@ -152,23 +172,34 @@ export function renderSidebar(props: SidebarProps) {
                       const span = item.querySelector(".oneclaw-sidebar__session-name") as HTMLSpanElement;
                       startInlineRename(span, s.key, s.label, props.onRenameSession);
                     }}
-                    title=${t("sidebar.rename")}
+                    data-tooltip=${t("sidebar.rename")}
                     aria-label=${t("sidebar.rename")}
                   >
                     ${icons.edit}
                   </button>
-                  <button
-                    class="oneclaw-sidebar__session-action"
-                    type="button"
-                    @click=${(e: Event) => {
-                      e.stopPropagation();
-                      props.onDeleteSession(s.key);
-                    }}
-                    title=${t("sidebar.delete")}
-                    aria-label=${t("sidebar.delete")}
-                  >
-                    ${icons.x}
-                  </button>
+                  ${isMain
+                    ? nothing
+                    : (() => {
+                        const deleting = props.isDeletingSession(s.key);
+                        const tooltip = deleting ? t("sidebar.archiving") : t("sidebar.delete");
+                        return html`
+                          <button
+                            class="oneclaw-sidebar__session-action ${deleting ? "is-loading" : ""}"
+                            type="button"
+                            aria-disabled=${deleting ? "true" : "false"}
+                            aria-busy=${deleting ? "true" : "false"}
+                            @click=${(e: Event) => {
+                              e.stopPropagation();
+                              if (deleting) return;
+                              props.onDeleteSession(s.key);
+                            }}
+                            data-tooltip=${tooltip}
+                            aria-label=${tooltip}
+                          >
+                            ${deleting ? icons.loader : icons.x}
+                          </button>
+                        `;
+                      })()}
                 </div>
               `;
             },
@@ -177,6 +208,24 @@ export function renderSidebar(props: SidebarProps) {
       </nav>
 
       <div class="oneclaw-sidebar__footer">
+        ${props.webbridgeRepairVisible
+          ? (() => {
+              // 不挂 tooltip——点击 pill 弹 modal 已经承担提示职责，避免 hover + click 双重提示
+              const checking = props.webbridgeRepairChecking;
+              return html`
+                <button
+                  class="oneclaw-sidebar__item oneclaw-sidebar__item--webbridge-repair ${checking ? "is-checking" : ""}"
+                  type="button"
+                  @click=${props.onWebbridgeRepairClick}
+                >
+                  <span class="oneclaw-sidebar__icon">
+                    ${checking ? icons.loader : icons.wrench}
+                  </span>
+                  <span class="oneclaw-sidebar__label">${t("sidebar.webbridgeRepairNeeded")}</span>
+                </button>
+              `;
+            })()
+          : nothing}
         ${showUpdateAction
           ? html`
               <button
@@ -185,7 +234,6 @@ export function renderSidebar(props: SidebarProps) {
                   : ""}"
                 type="button"
                 @click=${props.onApplyUpdate}
-                title=${props.updateVersion ? `${updateLabel} (${props.updateVersion})` : updateLabel}
                 ?disabled=${props.updateStatus === "downloading"}
               >
                 <span class="oneclaw-sidebar__icon">
@@ -204,58 +252,95 @@ export function renderSidebar(props: SidebarProps) {
             : ""}"
           type="button"
           @click=${props.onOpenSettings}
-          title=${t("sidebar.settings")}
         >
           <span class="oneclaw-sidebar__icon">${icons.settings}</span>
           <span class="oneclaw-sidebar__label">${t("sidebar.settings")}</span>
+          ${props.settingsBadge
+            ? html`<span class="oneclaw-sidebar__badge oneclaw-sidebar__badge--new">${t("sidebar.weixinBadge")}</span>`
+            : nothing}
         </button>
 
         <button
           class="oneclaw-sidebar__item ${props.skillsActive ? "active" : ""}"
           type="button"
           @click=${props.onOpenSkillStore}
-          title=${t("sidebar.skillStore")}
         >
           <span class="oneclaw-sidebar__icon">${icons.puzzle}</span>
           <span class="oneclaw-sidebar__label">${t("sidebar.skillStore")}</span>
         </button>
 
         <button
-          class="oneclaw-sidebar__item"
+          class="oneclaw-sidebar__item ${props.workspaceActive ? "active" : ""}"
           type="button"
-          @click=${props.onOpenDocs}
-          title=${t("sidebar.docs")}
+          @click=${props.onOpenWorkspace}
         >
-          <span class="oneclaw-sidebar__icon">${icons.book}</span>
-          <span class="oneclaw-sidebar__label">${t("sidebar.docs")}</span>
+          <span class="oneclaw-sidebar__icon">${icons.folder}</span>
+          <span class="oneclaw-sidebar__label">${t("sidebar.workspace")}</span>
+        </button>
+
+        <button
+          class="oneclaw-sidebar__item ${props.cronActive ? "active" : ""}"
+          type="button"
+          @click=${props.onOpenCron}
+        >
+          <span class="oneclaw-sidebar__icon">${icons.clock}</span>
+          <span class="oneclaw-sidebar__label">${t("sidebar.cron")}</span>
+          ${props.cronJobCount > 0
+            ? html`<span class="oneclaw-sidebar__badge">${props.cronJobCount}</span>`
+            : nothing}
         </button>
 
         <button
           class="oneclaw-sidebar__item"
           type="button"
-          @click=${props.onOpenWebUI}
-          title=${t("sidebar.fullUI")}
+          @click=${props.onOpenDocs}
         >
-          <span class="oneclaw-sidebar__icon">${icons.externalLink}</span>
-          <span class="oneclaw-sidebar__label">${t("sidebar.fullUI")}</span>
+          <span class="oneclaw-sidebar__icon">${icons.book}</span>
+          <span class="oneclaw-sidebar__label">${t("sidebar.docs")}</span>
         </button>
 
-        <div class="oneclaw-sidebar__status-row">
-          <div class="oneclaw-sidebar__status">
-            <span class="statusDot ${statusClass}"></span>
-            <span class="oneclaw-sidebar__status-text">${statusText}</span>
-          </div>
-          <button
-            class="oneclaw-sidebar__refresh ${props.connected ? "" : "disconnected"}"
-            type="button"
-            ?disabled=${props.refreshDisabled}
-            @click=${props.onRefresh}
-            title=${t("sidebar.refresh")}
-            aria-label=${t("sidebar.refresh")}
-          >
-            ${refreshIcon}
-          </button>
-        </div>
+        ${props.connected
+          ? html`
+            <div class="oneclaw-sidebar__reconnect-wrap">
+              <button
+                class="oneclaw-sidebar__item"
+                type="button"
+                @click=${props.onOpenWebUI}
+              >
+                <span class="oneclaw-sidebar__icon">${icons.externalLink}</span>
+                <span class="oneclaw-sidebar__label">${t("sidebar.fullUI")}</span>
+                ${props.errors.length > 0
+                  ? html`<span class="oneclaw-sidebar__error-badge" title=${props.errors.join("\n")}>${props.errors.length}</span>`
+                  : nothing}
+              </button>
+              ${props.errors.length > 0
+                ? html`
+                  <div class="oneclaw-sidebar__error-popup">
+                    ${props.errors.map((msg) => html`<div class="oneclaw-sidebar__error-item">${msg}</div>`)}
+                  </div>`
+                : nothing}
+            </div>`
+          : html`
+            <div class="oneclaw-sidebar__reconnect-wrap">
+              <button
+                class="oneclaw-sidebar__item oneclaw-sidebar__item--disconnected"
+                type="button"
+                @click=${props.onReconnect}
+              >
+                <span class="oneclaw-sidebar__icon">${refreshIcon}</span>
+                <span class="oneclaw-sidebar__label">${t("sidebar.reconnect")}</span>
+                ${props.errors.length > 0
+                  ? html`<span class="oneclaw-sidebar__error-badge" title=${props.errors.join("\n")}>${props.errors.length}</span>`
+                  : nothing}
+              </button>
+              ${props.errors.length > 0
+                ? html`
+                  <div class="oneclaw-sidebar__error-popup">
+                    ${props.errors.map((msg) => html`<div class="oneclaw-sidebar__error-item">${msg}</div>`)}
+                  </div>`
+                : nothing}
+            </div>`
+        }
       </div>
     </aside>
   `;
